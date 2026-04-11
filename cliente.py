@@ -15,48 +15,47 @@ ADDR = (HOST, PORT)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-# Estado compartilhado entre threads
-_lock        = threading.Lock()
-_estado_mapa = None
-_rodando     = True
-_ui: UI      = None
+_lock    = threading.Lock()
+_rodando = True
+_ui: UI  = None
+_meu_time = ""
+_meu_hp   = 3
 
+_aguardando = threading.Event()  # sinaliza eventos assíncronos para o loop principal
 
-# ── Mapeamento de teclas → direção ────────────────────────────────────────────
-TECLAS_MOVIMENTO = {
-    # WASD (maiúsculo e minúsculo)
-    "w": "cima",  "W": "cima",
-    "s": "baixo", "S": "baixo",
-    "a": "esq",   "A": "esq",
-    "d": "dir",   "D": "dir",
-    # Teclas de seta (curses)
+TECLAS_MOVER = {
     "KEY_UP":    "cima",
     "KEY_DOWN":  "baixo",
     "KEY_LEFT":  "esq",
     "KEY_RIGHT": "dir",
 }
+TECLAS_ATIRAR = {
+    "w": "cima",  "W": "cima",
+    "s": "baixo", "S": "baixo",
+    "a": "esq",   "A": "esq",
+    "d": "dir",   "D": "dir",
+}
 
 
 # ── Callbacks da thread de rede ───────────────────────────────────────────────
-def _on_mapa(payload: dict):
-    global _estado_mapa
-    with _lock:
-        _estado_mapa = payload
+def _on_mapa_estatico(payload: dict):
     if _ui:
-        _ui.renderizar_mapa(payload)
+        _ui.atualizar_mapa_estatico(payload)
 
+def _on_estado(payload: dict):
+    if _ui:
+        _ui.renderizar_estado(payload)
 
 def _on_msg(texto: str):
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(texto)
-
+        _aguardando.set()   # desbloqueia o loop se estiver esperando boas-vindas
 
 def _on_erro(texto: str):
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(f"[!] {texto}")
-
 
 def _on_desligar():
     global _rodando
@@ -64,11 +63,29 @@ def _on_desligar():
         with _lock:
             _ui.adicionar_mensagem("[Servidor encerrado]")
     _rodando = False
+    _aguardando.set()
+
+def _on_escolha_time(texto: str):
+    if _ui:
+        with _lock:
+            _ui.adicionar_mensagem(f"\n[Servidor] {texto}")
+    _aguardando.set()
+
+def _on_atingido(hp: int, atirador: str):
+    global _meu_hp
+    _meu_hp = hp
+    msg = (f"☠ Eliminado por {atirador}! Voltando à base..."
+           if hp == 0 else
+           f"💥 Atingido por {atirador}! HP={hp}")
+    if _ui:
+        with _lock:
+            _ui.adicionar_mensagem(msg)
+            _ui.status_jogo(_meu_time, max(hp, 0))
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main(stdscr=curses.initscr()):
-    global _rodando, _ui
+    global _rodando, _ui, _meu_time, _meu_hp
 
     try:
         ui = UI(stdscr)
@@ -81,32 +98,48 @@ def main(stdscr=curses.initscr()):
 
     _ui = ui
 
-    # ── Login ──────────────────────────────────────────────────────────────────
+    # ── Apelido ───────────────────────────────────────────────────────────────
     apelido = ui.ler_texto("Apelido: ")
     sock.sendto(apelido.encode(), ADDR)
 
-    # Aguarda boas-vindas
-    raw, _ = sock.recvfrom(proto.BUFFERSIZE)
-    payload = proto.decode(raw)
-    ui.adicionar_mensagem(payload.get("texto", ""))
-
-    # Inicializa mapa a partir do payload de boas-vindas
-    mapa_inicial = payload.get("mapa")
-    if mapa_inicial:
-        _on_mapa(mapa_inicial)
-
-    # ── Receptor de rede ───────────────────────────────────────────────────────
-    receptor = Receptor(sock, _on_mapa, _on_msg, _on_erro, _on_desligar)
+    # ── Inicia receptor ───────────────────────────────────────────────────────
+    receptor = Receptor(
+        sock,
+        on_mapa_estatico = _on_mapa_estatico,
+        on_estado        = _on_estado,
+        on_msg           = _on_msg,
+        on_erro          = _on_erro,
+        on_desligar      = _on_desligar,
+        on_escolha_time  = _on_escolha_time,
+        on_atingido      = _on_atingido,
+    )
     receptor.iniciar()
 
-    # ── Status ────────────────────────────────────────────────────────────────
-    ui.status_jogo()
-    ui.adicionar_mensagem(
-        "Conectado! Use WASD ou setas para mover. "
-        "Digite /chat para enviar mensagem ou /sair para sair."
-    )
+    # ── Aguarda pedido de time ────────────────────────────────────────────────
+    _aguardando.wait(timeout=10)
+    _aguardando.clear()
+    if not _rodando:
+        receptor.parar(); sock.close(); return
 
-    # ── Loop de input por tecla única ─────────────────────────────────────────
+    while _rodando:
+        escolha = ui.ler_texto("Seu time (A ou B): ").strip().upper()
+        if escolha in ("A", "B"):
+            sock.sendto(f"{proto.CMD_TIME} {escolha}".encode(), ADDR)
+            _meu_time = escolha
+            break
+        ui.adicionar_mensagem("[!] Digite A ou B.")
+
+    # ── Aguarda boas-vindas (msg_bv chega após mapa_estatico + estado) ────────
+    _aguardando.wait(timeout=10)
+    _aguardando.clear()
+    if not _rodando:
+        receptor.parar(); sock.close(); return
+
+    _meu_hp = 3
+    ui.status_jogo(_meu_time, _meu_hp)
+    ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  /sair=sair")
+
+    # ── Loop de input ─────────────────────────────────────────────────────────
     while _rodando:
         try:
             tecla = ui.ler_tecla()
@@ -115,35 +148,29 @@ def main(stdscr=curses.initscr()):
         except KeyboardInterrupt:
             break
 
-        # Movimento
-        if tecla in TECLAS_MOVIMENTO:
-            direcao = TECLAS_MOVIMENTO[tecla]
-            cmd = f"{proto.CMD_MOVER} {direcao}"
-            sock.sendto(cmd.encode(), ADDR)
+        if tecla in TECLAS_MOVER:
+            sock.sendto(f"{proto.CMD_MOVER} {TECLAS_MOVER[tecla]}".encode(), ADDR)
             continue
 
-        # /sair
-        if tecla in ("\n", "\r") or tecla == "q":
-            # Se pressionou Enter ou 'q', abre modo texto para confirmar comando
-            pass   # tratado abaixo no modo texto
+        if tecla in TECLAS_ATIRAR:
+            sock.sendto(f"{proto.CMD_ATIRAR} {TECLAS_ATIRAR[tecla]}".encode(), ADDR)
+            continue
 
-        # Qualquer outra tecla abre modo de texto (chat ou comandos)
-        if len(tecla) == 1 and tecla not in TECLAS_MOVIMENTO:
-            # Primeiro caractere já digitado, passa para ler_texto
-            if tecla == "/":
-                texto = "/" + ui.ler_texto("> /")
-            else:
-                texto = tecla + ui.ler_texto(f"> {tecla}")
-
+        if tecla == "/":
+            texto = "/" + ui.ler_texto("> /")
             texto = texto.strip()
-            if not texto:
-                continue
-
             if texto == proto.CMD_SAIR:
                 sock.sendto(proto.CMD_SAIR.encode(), ADDR)
                 _rodando = False
                 break
+            sock.sendto(texto.encode(), ADDR)
+            continue
 
+        if len(tecla) == 1:
+            texto = tecla + ui.ler_texto(f"> {tecla}")
+            texto = texto.strip()
+            if not texto:
+                continue
             sock.sendto(texto.encode(), ADDR)
             with _lock:
                 ui.adicionar_mensagem(f"Você ({apelido}): {texto}")
