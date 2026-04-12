@@ -2,37 +2,46 @@
 server/conexoes.py
 Aceita pacotes UDP, registra jogadores e despacha comandos.
 
-Protocolo de envio:
-  - Mapa estático  → enviado UMA VEZ para cada cliente na boas-vindas
-  - Estado dinâmico→ enviado a cada movimento/tick (jogadores + projéteis)
+Alterações em relação à versão anterior (marcadas com # ITEM):
+  1. iniciar()            → gera itens ao subir o servidor
+  2. _estado_atual()      → inclui snapshot de itens no payload
+  3. _processar_movimento → chama verificar_coleta após mover
 """
 import threading
 from shared import protocolo as proto
 from server import mapa as Mapa
 from server import projeteis as Projeteis
 from server import bases as Bases
+from server import itens as Itens          # ITEM
 
 lock = threading.Lock()
-clientes: dict = {}          # addr → { apelido, x, y, time, hp }
-_aguardando_time: dict = {}  # addr → apelido (ainda não escolheu time)
+clientes: dict = {}
+_aguardando_time: dict = {}
 
 _socket  = None
 _log_fn  = None
 _rodando = True
 
+_itens: dict = {}                          # ITEM — estado global dos itens
+
 
 # ── Inicialização ─────────────────────────────────────────────────────────────
 def iniciar(sock, log_fn):
-    global _socket, _log_fn
+    global _socket, _log_fn, _itens
+
     _socket = sock
     _log_fn = log_fn
 
+    # ITEM — gera itens no campo neutro
+    _itens = Itens.gerar_itens(Mapa.MAPA_LINHAS, Mapa.MAPA_COLUNAS)
+    _log(f"[ITENS] {len(_itens)} itens gerados no campo.")
+
     Projeteis.iniciar(
-        clientes       = clientes,
-        lock_clientes  = lock,
-        on_tick        = _broadcast_estado_todos,
-        on_atingido    = _notificar_atingido,
-        log_fn         = log_fn,
+        clientes      = clientes,
+        lock_clientes = lock,
+        on_tick       = _broadcast_estado_todos,
+        on_atingido   = _notificar_atingido,
+        log_fn        = log_fn,
     )
 
 
@@ -55,7 +64,9 @@ def _enviar(addr, dados: bytes):
 
 def _estado_atual():
     jogs, projs = Mapa.snapshot_estado(clientes, Projeteis.snapshot_projeteis())
-    return proto.msg_estado(jogs, projs)
+    # ITEM — inclui posições dos itens disponíveis no payload dinâmico
+    itens_snap = Itens.snapshot_itens(_itens)
+    return proto.msg_estado(jogs, projs, itens_snap)
 
 def _broadcast_estado_todos():
     dados = _estado_atual()
@@ -107,19 +118,15 @@ def _confirmar_time(addr, time: str):
             "apelido": apelido,
             "x": x, "y": y,
             "time": time,
-            "hp": Projeteis.HP_INICIAL,
+            "hp":   Projeteis.HP_INICIAL,
+            "escudo": False,               # ITEM — flag de escudo
         }
 
     _log(f"[+] {apelido} → Time {time} em ({x},{y})")
 
-    # 1) Envia mapa estático (uma única vez)
     est = Mapa.snapshot_estatico()
     _enviar(addr, proto.msg_mapa_estatico(est["linhas"], est["colunas"], est["mapa"]))
-
-    # 2) Envia boas-vindas
     _enviar(addr, proto.msg_bv(f"Bem-vindo ao Time {time}, {apelido}! HP={Projeteis.HP_INICIAL}"))
-
-    # 3) Envia estado atual (jogadores + projéteis)
     _enviar(addr, _estado_atual())
 
     _broadcast_chat(f"[Servidor] {apelido} (Time {time}) entrou.", exceto=addr)
@@ -138,24 +145,42 @@ def _desconectar(addr):
 
 
 def _processar_movimento(addr, direcao: str):
+    item_coletado = None
+
     with lock:
         moveu = Mapa.mover_jogador(addr, direcao, clientes)
+        if moveu:
+            # ITEM — verifica coleta imediatamente após o movimento (dentro do lock)
+            item_coletado = Itens.verificar_coleta(
+                clientes[addr], _itens, log_fn=_log
+            )
 
-    if moveu:
-        _broadcast_estado_todos()
-    else:
+    if not moveu:
         _enviar(addr, proto.msg_erro("Movimento inválido."))
+        return
+
+    _broadcast_estado_todos()
+
+    # Notifica o coletor com o efeito aplicado
+    if item_coletado:
+        tipo  = _itens[item_coletado]["tipo"]
+        efeito = "+1 HP" if tipo == "cura" else "escudo ativado"
+        _enviar(addr, proto.msg_chat(f"[Item] Você coletou {item_coletado} ({efeito})!"))
+        _broadcast_chat(
+            f"[Item] {clientes[addr]['apelido']} coletou {item_coletado}!",
+            exceto=addr,
+        )
 
 
 def _processar_tiro(addr, direcao: str):
     with lock:
         if addr not in clientes:
             return
-        dados   = clientes[addr]
-        time_j  = dados.get("time")
+        dados  = clientes[addr]
+        time_j = dados.get("time")
         if time_j is None:
             return
-        x, y    = dados["x"], dados["y"]
+        x, y   = dados["x"], dados["y"]
         apelido = dados["apelido"]
 
     Projeteis.criar_projetil(x, y, direcao, time_j, apelido)
@@ -213,10 +238,14 @@ def listar_online() -> str:
     with lock:
         if not clientes:
             return "  Nenhum jogador conectado."
-        return "\n".join(
-            f"  [{d['time']}] {d['apelido']}  pos:({d['x']},{d['y']})  HP:{d['hp']}"
-            for d in clientes.values()
-        )
+        linhas = []
+        for d in clientes.values():
+            escudo = " 🛡" if d.get("escudo") else ""
+            linhas.append(
+                f"  [{d['time']}] {d['apelido']}  "
+                f"pos:({d['x']},{d['y']})  HP:{d['hp']}{escudo}"
+            )
+        return "\n".join(linhas)
 
 def broadcast_admin(texto: str):
     _broadcast_chat(f"[Servidor]: {texto}")

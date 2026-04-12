@@ -1,37 +1,31 @@
 """
 shared/protocolo.py
-Tipos de mensagem e helpers de serialização usados por servidor e cliente.
+Alteração em relação à versão anterior:
+  - msg_estado() aceita parâmetro opcional `itens` (lista de posições públicas)
+  - Nenhum tipo novo adicionado — itens chegam embutidos no TIPO_ESTADO
 """
 import json
 
-# UDP seguro até ~8 KB no Windows; estado dinâmico cabe folgado nesse limite.
-# O mapa estático é enviado uma única vez na conexão — pode ser maior.
-BUFFERSIZE       = 65507   # máximo teórico UDP (usado só para recvfrom)
-BUFFERSIZE_ESTADO = 8192   # tamanho máximo esperado do payload dinâmico
+BUFFERSIZE        = 65507
+BUFFERSIZE_ESTADO = 8192
 
-# ── Tipos de payload ──────────────────────────────────────────────────────────
-TIPO_BV             = "bv"        # boas-vindas + mapa estático
-TIPO_MAPA_ESTATICO  = "mapa_est"  # matriz do mapa (enviado uma só vez)
-TIPO_ESTADO         = "estado"    # posições de jogadores + projéteis (a cada tick)
-TIPO_MSG            = "msg"       # mensagem de texto/chat
-TIPO_ERRO           = "erro"      # erro de operação
-TIPO_ESCOLHA        = "escolha"   # servidor pede escolha de time
-TIPO_ATINGIDO       = "atingido"  # jogador foi atingido
+TIPO_BV            = "bv"
+TIPO_MAPA_ESTATICO = "mapa_est"
+TIPO_ESTADO        = "estado"
+TIPO_MSG           = "msg"
+TIPO_ERRO          = "erro"
+TIPO_ESCOLHA       = "escolha"
+TIPO_ATINGIDO      = "atingido"
+TIPO_MAPA          = TIPO_ESTADO   # alias de compatibilidade
 
-# Alias de compatibilidade (rede.py checa TIPO_MAPA também)
-TIPO_MAPA = TIPO_ESTADO
+CMD_SAIR   = "/sair"
+CMD_MOVER  = "/mover"
+CMD_ATIRAR = "/atirar"
+CMD_TIME   = "/time"
 
-# ── Comandos do cliente ───────────────────────────────────────────────────────
-CMD_SAIR    = "/sair"
-CMD_MOVER   = "/mover"    # /mover cima|baixo|esq|dir
-CMD_ATIRAR  = "/atirar"   # /atirar cima|baixo|esq|dir
-CMD_TIME    = "/time"     # /time A|B
-
-# ── Times ─────────────────────────────────────────────────────────────────────
 TIME_A = "A"
 TIME_B = "B"
 
-# ── Direções ──────────────────────────────────────────────────────────────────
 DIRECOES = {
     "cima":  (0, -1),
     "baixo": (0,  1),
@@ -39,33 +33,26 @@ DIRECOES = {
     "dir":   (1,  0),
 }
 
-# ── Serialização ──────────────────────────────────────────────────────────────
 def encode(payload: dict) -> bytes:
     return json.dumps(payload, separators=(",", ":")).encode()
 
 def decode(data: bytes) -> dict:
     return json.loads(data.decode())
 
-# ── Construtores de payload ───────────────────────────────────────────────────
 def msg_mapa_estatico(linhas: int, colunas: int, mapa: list) -> bytes:
-    """Enviado uma única vez na boas-vindas. Contém a matriz completa."""
-    return encode({
-        "tipo":    TIPO_MAPA_ESTATICO,
-        "linhas":  linhas,
-        "colunas": colunas,
-        "mapa":    mapa,
-    })
+    return encode({"tipo": TIPO_MAPA_ESTATICO, "linhas": linhas,
+                   "colunas": colunas, "mapa": mapa})
 
 def msg_bv(texto: str) -> bytes:
-    """Boas-vindas simples — mapa estático é enviado em pacote separado."""
     return encode({"tipo": TIPO_BV, "texto": texto})
 
-def msg_estado(jogadores: dict, projeteis: list) -> bytes:
-    """Payload dinâmico: apenas posições + HP + projéteis. Enviado a cada tick."""
+def msg_estado(jogadores: dict, projeteis: list, itens: list = None) -> bytes:
+    # ITEM — itens incluídos como campo opcional; [] se não houver
     return encode({
         "tipo":      TIPO_ESTADO,
         "jogadores": jogadores,
         "projeteis": projeteis,
+        "itens":     itens or [],
     })
 
 def msg_chat(texto: str) -> bytes:
