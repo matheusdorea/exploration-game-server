@@ -1,0 +1,25 @@
+# Cliente (jogadores rodam localmente, não vai pro container)
+cliente.py
+client/
+
+# Cache Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Ambientes virtuais
+venv/
+.venv/
+env/
+
+# Metadados e docs
+.git/
+.gitignore
+*.md
+deploy/
+DEPLOY.md
+
+# Arquivos de sistema
+.DS_Store
+Thumbs.db
