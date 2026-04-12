@@ -1,13 +1,29 @@
 """
 server/mapa.py
-Matriz do mapa, validações de movimento e snapshot de estado.
+Matriz do mapa, validações de movimento e snapshots.
+
+Para alterar o tamanho do mapa basta mudar MAPA_LINHAS e MAPA_COLUNAS.
+As bases se ajustam automaticamente via server/bases.py.
 """
 from shared.protocolo import DIRECOES
+from server import bases as Bases
 
-MAPA_LINHAS  = 10
-MAPA_COLUNAS = 20
+# ┌─────────────────────────────────────────────────────────────────────────────┐
+# │  CONFIGURAÇÃO DO MAPA — altere aqui para redimensionar                      │
+MAPA_LINHAS  = 30
+MAPA_COLUNAS = 60
+# └─────────────────────────────────────────────────────────────────────────────┘
 
-# Células: 0 = livre, 1 = parede
+# Inicializa as bases com as dimensões escolhidas
+Bases.configurar(MAPA_LINHAS, MAPA_COLUNAS)
+
+# ── Tipos de célula ───────────────────────────────────────────────────────────
+CELULA_LIVRE  = 0
+CELULA_PAREDE = 1
+CELULA_BASE_A = 2
+CELULA_BASE_B = 3
+
+
 def _criar_mapa() -> list[list[int]]:
     mapa = []
     for r in range(MAPA_LINHAS):
@@ -15,9 +31,17 @@ def _criar_mapa() -> list[list[int]]:
         for c in range(MAPA_COLUNAS):
             eh_borda = (r == 0 or r == MAPA_LINHAS - 1 or
                         c == 0 or c == MAPA_COLUNAS - 1)
-            linha.append(1 if eh_borda else 0)
+            if eh_borda:
+                linha.append(CELULA_PAREDE)
+            elif Bases.eh_base(c, r) == "A":
+                linha.append(CELULA_BASE_A)
+            elif Bases.eh_base(c, r) == "B":
+                linha.append(CELULA_BASE_B)
+            else:
+                linha.append(CELULA_LIVRE)
         mapa.append(linha)
     return mapa
+
 
 _mapa: list[list[int]] = _criar_mapa()
 
@@ -26,61 +50,69 @@ _mapa: list[list[int]] = _criar_mapa()
 def eh_parede(x: int, y: int) -> bool:
     if x < 0 or x >= MAPA_COLUNAS or y < 0 or y >= MAPA_LINHAS:
         return True
-    return _mapa[y][x] == 1
+    return _mapa[y][x] == CELULA_PAREDE
 
-def celula_livre(x: int, y: int, clientes: dict) -> bool:
-    """
-    Retorna True se (x, y) está dentro dos limites, não é parede
-    e nenhum jogador já ocupa essa posição.
-    """
+
+def celula_livre(x: int, y: int, clientes: dict, time_jogador: str = None) -> bool:
     if eh_parede(x, y):
         return False
+    if time_jogador and not Bases.pode_entrar(x, y, time_jogador):
+        return False
     for dados in clientes.values():
+        if dados.get("time") is None:
+            continue
         if dados["x"] == x and dados["y"] == y:
             return False
     return True
 
-def posicao_inicial(clientes: dict) -> tuple[int | None, int | None]:
-    """Primeira célula livre do interior do mapa."""
-    for r in range(1, MAPA_LINHAS - 1):
-        for c in range(1, MAPA_COLUNAS - 1):
-            if celula_livre(c, r, clientes):
-                return c, r
-    return None, None
+
+def posicao_inicial(clientes: dict, time: str) -> tuple[int | None, int | None]:
+    return Bases.spawn_time(time, clientes)
 
 
 # ── Movimento ─────────────────────────────────────────────────────────────────
 def mover_jogador(addr, direcao: str, clientes: dict) -> bool:
-    """
-    Tenta mover o jogador em 'addr' na direção indicada.
-    Retorna True se o movimento foi aplicado, False se bloqueado.
-    """
     if direcao not in DIRECOES:
         return False
-    dx, dy = DIRECOES[direcao]
-    cx = clientes[addr]["x"]
-    cy = clientes[addr]["y"]
-    nx, ny = cx + dx, cy + dy
+    dados    = clientes[addr]
+    time_jog = dados.get("time")
+    dx, dy   = DIRECOES[direcao]
+    nx, ny   = dados["x"] + dx, dados["y"] + dy
 
-    if not celula_livre(nx, ny, clientes):
+    if not celula_livre(nx, ny, clientes, time_jog):
         return False
 
-    clientes[addr]["x"] = nx
-    clientes[addr]["y"] = ny
+    dados["x"] = nx
+    dados["y"] = ny
     return True
 
 
-# ── Snapshot ──────────────────────────────────────────────────────────────────
-def snapshot(clientes: dict) -> dict:
-    """Serializa mapa + posições de todos os jogadores."""
-    jogadores = {
-        dados["apelido"]: {"x": dados["x"], "y": dados["y"]}
-        for dados in clientes.values()
-    }
+# ── Snapshots ─────────────────────────────────────────────────────────────────
+def snapshot_estatico() -> dict:
+    """
+    Retorna a matriz do mapa.
+    Enviado UMA VEZ para cada cliente ao conectar.
+    """
     return {
-        "tipo":     "mapa",
-        "linhas":   MAPA_LINHAS,
-        "colunas":  MAPA_COLUNAS,
-        "mapa":     _mapa,
-        "jogadores": jogadores,
+        "linhas":  MAPA_LINHAS,
+        "colunas": MAPA_COLUNAS,
+        "mapa":    _mapa,
     }
+
+
+def snapshot_estado(clientes: dict, projeteis: list = None) -> tuple[dict, list]:
+    """
+    Retorna apenas o estado dinâmico: posições + HP dos jogadores e projéteis.
+    Enviado a cada tick/movimento — tamanho fixo, independente do mapa.
+    """
+    jogadores = {
+        dados["apelido"]: {
+            "x":    dados["x"],
+            "y":    dados["y"],
+            "time": dados.get("time"),
+            "hp":   dados.get("hp", 3),
+        }
+        for dados in clientes.values()
+        if dados.get("time") is not None
+    }
+    return jogadores, projeteis or []
