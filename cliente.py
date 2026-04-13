@@ -123,8 +123,6 @@ def main(stdscr):
     _apelido = apelido
 
     # ── Handshake com versão ──────────────────────────────────────────────────
-    # Envia apelido + versão em vez de apelido puro.
-    # O servidor valida a versão antes de prosseguir.
     sock.sendto(proto.encode_handshake(apelido), ADDR)
 
     # ── Receptor ──────────────────────────────────────────────────────────────
@@ -147,7 +145,6 @@ def main(stdscr):
     _aguardando.wait(timeout=10)
     _aguardando.clear()
 
-    # Se versão inválida ou timeout, encerra
     if not _rodando:
         ui.adicionar_mensagem("Pressione qualquer tecla para sair.")
         ui.ler_tecla()
@@ -156,8 +153,6 @@ def main(stdscr):
         return
 
     # ── Escolha de time ───────────────────────────────────────────────────────
-    # _on_escolha_time já fez set() no _aguardando via msg_escolha_time do servidor
-    # mas pode não ter chegado ainda — aguarda
     _aguardando.wait(timeout=10)
     _aguardando.clear()
     if not _rodando:
@@ -177,7 +172,7 @@ def main(stdscr):
     if not _rodando:
         receptor.parar(); sock.close(); return
 
-    ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  /sair=sair")
+    ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  Enter=chat  │  /sair=sair")
 
     # ── Loop de input ─────────────────────────────────────────────────────────
     TECLAS_MOVER = {
@@ -205,24 +200,19 @@ def main(stdscr):
             sock.sendto(f"{proto.CMD_ATIRAR} {TECLAS_ATIRAR[tecla]}".encode(), ADDR)
             continue
 
-        if tecla == "/":
-            texto = "/" + ui.ler_texto("> /")
-            texto = texto.strip()
-            if texto == proto.CMD_SAIR:
+        # Enter ativa o modo chat — WASD e setas ficam desativados até confirmar
+        if tecla in ("\n", "\r", "KEY_ENTER"):
+            texto = ui.ler_chat("> ")
+            if not texto:
+                continue
+            if texto.strip() == proto.CMD_SAIR:
                 sock.sendto(proto.CMD_SAIR.encode(), ADDR)
                 _rodando = False
                 break
             sock.sendto(texto.encode(), ADDR)
-            continue
-
-        if len(tecla) == 1:
-            texto = tecla + ui.ler_texto(f"> {tecla}")
-            texto = texto.strip()
-            if not texto:
-                continue
-            sock.sendto(texto.encode(), ADDR)
             with _lock:
                 ui.adicionar_mensagem(f"Você ({apelido}): {texto}")
+            continue
 
     receptor.parar()
     sock.close()

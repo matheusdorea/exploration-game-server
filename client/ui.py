@@ -5,6 +5,8 @@ Renderização curses. Mudanças:
   - renderizar_estado desenha itens e bandeiras
   - ler_tecla ignora KEY_ENTER para não crashar
   - clipping de mapa: nunca tenta escrever fora da área visível
+  - painel_chat_input dedicado: ler_chat usa linha própria entre
+    painel_msgs e sep2, evitando clipping com mensagens da rede
 """
 import curses
 
@@ -55,11 +57,16 @@ class UI:
         sep1.addstr(0, 0, "─" * (largura - 1))
         sep1.refresh()
 
-        msgs_h = max(altura - AREA_MAPA - 3, 2)
+        # -4 em vez de -3: reserva 1 linha extra para painel_chat_input
+        msgs_h = max(altura - AREA_MAPA - 4, 2)
         self.painel_msgs = curses.newwin(msgs_h, largura, AREA_MAPA + 1, 0)
         self.painel_msgs.scrollok(True)
 
-        sep2 = curses.newwin(1, largura, altura - 2, 0)
+        # Linha dedicada ao input de chat — fica logo abaixo de painel_msgs
+        chat_y = AREA_MAPA + 1 + msgs_h
+        self.painel_chat_input = curses.newwin(1, largura, chat_y, 0)
+
+        sep2 = curses.newwin(1, largura, chat_y + 1, 0)
         sep2.addstr(0, 0, "─" * (largura - 1))
         sep2.refresh()
 
@@ -96,8 +103,8 @@ class UI:
         ping    = f"  {ping_ms}ms" if ping_ms >= 0 else ""
         self._atualizar_status(
             f"[Time {time}] {barra}  {municao}{flag}{ping}"
-            f"  │  Setas=mover  WASD=atirar  /=cmd"
-    )
+            f"  │  Setas=mover  WASD=atirar  Enter=chat"
+        )
 
     def adicionar_mensagem(self, msg: str):
         try:
@@ -218,12 +225,56 @@ class UI:
                 k = self.stdscr.getkey()
             except curses.error:
                 continue
-            # ignora enter para não crashar
-            if k in ("\n", "\r", "KEY_ENTER"):
-                continue
+            # Enter é retornado normalmente — o loop de cliente decide o que fazer
             return k
 
+    def ler_chat(self, prompt: str = "> ") -> str:
+        """
+        Captura input de chat no painel_chat_input dedicado.
+        painel_msgs continua recebendo mensagens da rede sem causar clipping,
+        pois o input ocorre em uma linha separada entre msgs e sep2.
+        Escape cancela e retorna string vazia.
+        """
+        texto = ""
+        curses.curs_set(1)
+
+        def _renderizar():
+            self.painel_chat_input.erase()
+            linha = f"{prompt}{texto}_"
+            try:
+                self.painel_chat_input.addstr(0, 0, linha[: self.largura - 1])
+            except curses.error:
+                pass
+            self.painel_chat_input.refresh()
+
+        _renderizar()
+
+        while True:
+            try:
+                k = self.stdscr.getkey()
+            except curses.error:
+                continue
+
+            if k in ("\n", "\r", "KEY_ENTER"):
+                break
+            elif k == "\x1b":              # Escape cancela
+                texto = ""
+                break
+            elif k in ("KEY_BACKSPACE", "\x7f", "\b"):
+                texto = texto[:-1]
+            elif len(k) == 1:
+                texto += k
+
+            _renderizar()
+
+        # Limpa a linha de input ao sair do modo chat
+        self.painel_chat_input.erase()
+        self.painel_chat_input.refresh()
+        curses.curs_set(0)
+        return texto
+
     def ler_texto(self, prompt: str = "> ") -> str:
+        """Usado apenas no fluxo de login (apelido, escolha de time)."""
         texto = ""
         curses.curs_set(1)
         while True:
