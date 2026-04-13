@@ -126,9 +126,6 @@ def _loop_tick():
 
 
 def _verificar_recargas():
-    if _on_municao is None:
-        return
-
     agora      = time.time()
     concluidos = []
 
@@ -139,7 +136,8 @@ def _verificar_recargas():
                 m["recarregando_ate"] = 0.0
                 concluidos.append(ap)
 
-    if not concluidos:
+    # Notificação individual só se o callback existir
+    if not concluidos or _on_municao is None:
         return
 
     with _lock_clientes:
