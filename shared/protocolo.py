@@ -22,7 +22,7 @@ BUFFERSIZE_ESTADO = 8192
 
 # ── Versão do protocolo ───────────────────────────────────────────────────────
 # Incrementar MAJOR em mudanças incompatíveis, MINOR em adições retrocompatíveis.
-VERSAO = "1.0"
+VERSAO = "1.1"
 
 # ── Tipos de payload ──────────────────────────────────────────────────────────
 TIPO_BV              = "bv"
