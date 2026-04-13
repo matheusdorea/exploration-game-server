@@ -1,0 +1,32 @@
+services:
+  servidor:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: exploration-game-server:latest
+    container_name: exploration-game-server
+
+    restart: unless-stopped
+
+    ports:
+      - "0.0.0.0:12345:12345/udp"
+
+    # ── Variáveis de ambiente ─────────────────────────────────────────────────
+    environment:
+      PORT: "12345"
+      HEADLESS: "1"
+
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: 128M
+        reservations:
+          cpus: "0.1"
+          memory: 32M
+
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"

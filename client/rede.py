@@ -1,33 +1,27 @@
 """
 client/rede.py
-Thread responsável por receber pacotes do servidor e atualizar o estado local.
+Thread de recebimento. Despacha payloads para callbacks sem guardar estado.
 """
 import threading
 from shared import protocolo as proto
 
 
 class Receptor:
-    """
-    Roda em background e despacha payloads recebidos para callbacks.
-    """
-
-    def __init__(self, sock, on_mapa, on_msg, on_erro, on_desligar):
-        """
-        Parâmetros
-        ----------
-        sock        : socket UDP já conectado
-        on_mapa     : callable(dict)  — chamado quando chega snapshot de mapa
-        on_msg      : callable(str)   — chamado quando chega mensagem de chat
-        on_erro     : callable(str)   — chamado quando chega erro do servidor
-        on_desligar : callable()      — chamado quando o servidor é encerrado
-        """
-        self._sock        = sock
-        self._on_mapa     = on_mapa
-        self._on_msg      = on_msg
-        self._on_erro     = on_erro
-        self._on_desligar = on_desligar
-        self._rodando     = True
-        self._thread      = threading.Thread(target=self._loop, daemon=True)
+    def __init__(self, sock, on_mapa_estatico, on_estado, on_msg,
+                 on_erro, on_desligar, on_escolha_time, on_ping,
+                 on_versao_ok, on_versao_invalida):
+        self._sock                = sock
+        self._on_mapa_estatico    = on_mapa_estatico
+        self._on_estado           = on_estado
+        self._on_msg              = on_msg
+        self._on_erro             = on_erro
+        self._on_desligar         = on_desligar
+        self._on_escolha_time     = on_escolha_time
+        self._on_ping             = on_ping
+        self._on_versao_ok        = on_versao_ok
+        self._on_versao_invalida  = on_versao_invalida
+        self._rodando             = True
+        self._thread              = threading.Thread(target=self._loop, daemon=True)
 
     def iniciar(self):
         self._thread.start()
@@ -42,10 +36,24 @@ class Receptor:
                 payload = proto.decode(raw)
                 tipo    = payload.get("tipo", "")
 
-                if tipo in (proto.TIPO_MAPA, proto.TIPO_BV):
-                    # boas-vindas também carrega snapshot em payload["mapa"]
-                    mapa_payload = payload if tipo == proto.TIPO_MAPA else payload.get("mapa", {})
-                    self._on_mapa(mapa_payload)
+                if tipo == proto.TIPO_VERSAO_OK:
+                    self._on_versao_ok()
+
+                elif tipo == proto.TIPO_VERSAO_INVALIDA:
+                    self._on_versao_invalida(
+                        payload.get("versao", "?"),
+                        payload.get("texto",  ""),
+                    )
+                    self._rodando = False
+
+                elif tipo == proto.TIPO_MAPA_ESTATICO:
+                    self._on_mapa_estatico(payload)
+
+                elif tipo == proto.TIPO_ESTADO:
+                    self._on_estado(payload)
+
+                elif tipo == proto.TIPO_BV:
+                    self._on_msg(payload.get("texto", ""))
 
                 elif tipo == proto.TIPO_MSG:
                     texto = payload.get("texto", "")
@@ -57,6 +65,12 @@ class Receptor:
 
                 elif tipo == proto.TIPO_ERRO:
                     self._on_erro(payload.get("texto", ""))
+
+                elif tipo == proto.TIPO_ESCOLHA:
+                    self._on_escolha_time(payload.get("texto", ""))
+
+                elif tipo == proto.TIPO_PING:
+                    self._on_ping()
 
             except Exception:
                 if self._rodando:
