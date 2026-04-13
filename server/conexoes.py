@@ -41,7 +41,7 @@ _pool: ThreadPoolExecutor = None
 _itens: dict = {}
 
 # ── Ping / timeout ────────────────────────────────────────────────────────────
-PING_INTERVAL_S = 2
+PING_INTERVAL_S = 0
 TIMEOUT_S       = 5
 
 _ultimo_pong: dict = {}

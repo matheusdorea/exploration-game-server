@@ -74,11 +74,13 @@ def _on_escolha_time(texto: str):
     _aguardando.set()
 
 def _on_ping():
-    global _ping_ms
-    sock.sendto(proto.CMD_PONG.encode(), ADDR)
+    global _ping_ms, _ping_enviado
+    agora = time.time()
     with _lock_ping:
         if _ping_enviado > 0:
-            _ping_ms = int((time.time() - _ping_enviado) * 1000)
+            _ping_ms = int((agora - _ping_enviado) * 1000)
+        _ping_enviado = agora          # registra o momento do envio
+    sock.sendto(proto.CMD_PONG.encode(), ADDR)
 
 def _on_versao_ok():
     """Servidor aceitou a versão — desbloqueia o fluxo de login."""

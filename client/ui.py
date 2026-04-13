@@ -102,8 +102,8 @@ class UI:
         flag    = " 🚩" if tem_bandeira else ""
         ping    = f"  {ping_ms}ms" if ping_ms >= 0 else ""
         self._atualizar_status(
-            f"[Time {time}] {barra}  {municao}{flag}{ping}"
-            f"  │  Setas=mover  WASD=atirar  Enter=chat"
+            f"[Time {time}] {barra}  {municao}{flag}"
+            f"  │  Setas=mover  WASD=atirar  Enter=chat{ping}"
         )
 
     def adicionar_mensagem(self, msg: str):
