@@ -8,17 +8,20 @@ from shared import protocolo as proto
 
 class Receptor:
     def __init__(self, sock, on_mapa_estatico, on_estado, on_msg,
-                 on_erro, on_desligar, on_escolha_time, on_ping):
-        self._sock             = sock
-        self._on_mapa_estatico = on_mapa_estatico
-        self._on_estado        = on_estado
-        self._on_msg           = on_msg
-        self._on_erro          = on_erro
-        self._on_desligar      = on_desligar
-        self._on_escolha_time  = on_escolha_time
-        self._on_ping          = on_ping
-        self._rodando          = True
-        self._thread           = threading.Thread(target=self._loop, daemon=True)
+                 on_erro, on_desligar, on_escolha_time, on_ping,
+                 on_versao_ok, on_versao_invalida):
+        self._sock                = sock
+        self._on_mapa_estatico    = on_mapa_estatico
+        self._on_estado           = on_estado
+        self._on_msg              = on_msg
+        self._on_erro             = on_erro
+        self._on_desligar         = on_desligar
+        self._on_escolha_time     = on_escolha_time
+        self._on_ping             = on_ping
+        self._on_versao_ok        = on_versao_ok
+        self._on_versao_invalida  = on_versao_invalida
+        self._rodando             = True
+        self._thread              = threading.Thread(target=self._loop, daemon=True)
 
     def iniciar(self):
         self._thread.start()
@@ -33,7 +36,17 @@ class Receptor:
                 payload = proto.decode(raw)
                 tipo    = payload.get("tipo", "")
 
-                if tipo == proto.TIPO_MAPA_ESTATICO:
+                if tipo == proto.TIPO_VERSAO_OK:
+                    self._on_versao_ok()
+
+                elif tipo == proto.TIPO_VERSAO_INVALIDA:
+                    self._on_versao_invalida(
+                        payload.get("versao", "?"),
+                        payload.get("texto",  ""),
+                    )
+                    self._rodando = False
+
+                elif tipo == proto.TIPO_MAPA_ESTATICO:
                     self._on_mapa_estatico(payload)
 
                 elif tipo == proto.TIPO_ESTADO:

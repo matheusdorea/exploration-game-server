@@ -1,6 +1,19 @@
 """
 server/conexoes.py
 Aceita pacotes UDP, registra jogadores e despacha comandos.
+
+Arquitetura de threads:
+  - loop_recebimento  → dispatcher UDP puro (1 thread dedicada)
+  - projeteis._thread → tick de física (1 thread dedicada)
+  - _loop_ping        → keepalive periódico (1 thread dedicada)
+  - ThreadPoolExecutor→ workers de lógica de jogo (POOL_WORKERS threads)
+
+Segurança:
+  - Throttle de movimento server-side: rejeita movimentos mais rápidos
+    que THROTTLE_MOVIMENTO_MS entre pacotes consecutivos do mesmo addr.
+  - Estado autoritativo: HP, balas, escudo e bandeira são lidos do servidor
+    e embutidos no campo "meu_estado" de cada pacote enviado individualmente.
+  - Cliente não guarda nem valida nenhum desses valores.
 """
 import os
 import threading
@@ -220,11 +233,29 @@ def _pode_mover(addr) -> bool:
 
 
 # ── Handlers (executados pelos workers da pool) ───────────────────────────────
-def _registrar_jogador(addr, apelido: str):
+def _registrar_jogador(addr, data: bytes):
+    """
+    Valida a versão do cliente antes de qualquer outra coisa.
+    Rejeita silenciosamente (com msg_versao_invalida) se a versão divergir.
+    """
+    apelido, versao_cliente = proto.decode_handshake(data)
+
+    if not apelido:
+        return   # pacote malformado — ignora
+
+    if versao_cliente != proto.VERSAO:
+        _log(
+            f"[VERSAO] {addr} rejeitado — "
+            f"cliente={versao_cliente!r} servidor={proto.VERSAO!r}"
+        )
+        _enviar(addr, proto.msg_versao_invalida(proto.VERSAO))
+        return
+
+    _enviar(addr, proto.msg_versao_ok())
     _aguardando_time[addr] = apelido
     with _lock_pong:
         _ultimo_pong[addr] = time.time()
-    _log(f"[?] {apelido} conectou {addr} — aguardando time")
+    _log(f"[?] {apelido} conectou {addr} (v{versao_cliente}) — aguardando time")
     _enviar(addr, proto.msg_escolha_time())
 
 
@@ -366,7 +397,7 @@ def loop_recebimento():
                 continue
 
             if addr not in clientes and addr not in _aguardando_time:
-                _pool.submit(_registrar_jogador, addr, msg)
+                _pool.submit(_registrar_jogador, addr, data)
                 continue
 
             _registrar_pong(addr)
