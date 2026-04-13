@@ -1,6 +1,12 @@
 """
 server/projeteis.py
 Loop de tick dos projéteis: criação, movimentação e colisões.
+
+Mudanças:
+  - Cadência por jogador: cooldown de COOLDOWN_TIRO segundos entre tiros
+  - Recarga automática: MAX_BALAS por jogador, recarrega quando zera
+  - Escudo absorve o hit (sem dano, sem morte)
+  - Morte reseta HP mas NÃO manda de volta à base a cada hit
 """
 import threading
 import time
@@ -12,43 +18,91 @@ from server import bases as Bases
 TICK_SEGUNDOS = 0.15
 HP_INICIAL    = 3
 DANO_PROJETIL = 1
+MAX_BALAS     = 5 # segundos mínimos entre tiros consecutivos
+TEMPO_RECARGA = 2.0   # segundos para recarregar após esgotar balas
 
 _projeteis: dict = {}
-_lock_proj  = threading.Lock()
+_lock_proj = threading.Lock()
+
+# apelido → {balas, ultimo_tiro, recarregando_ate}
+_municao: dict   = {}
+_lock_mun = threading.Lock()
 
 _clientes_ref  = None
 _lock_clientes = None
-_on_tick       = None   # callable() → broadcast estado
+_on_tick       = None
 _on_atingido   = None   # callable(addr, hp, atirador)
+_on_municao    = None   # callable(addr, qtd)
 _log_fn        = None
 _rodando       = False
 _thread        = None
 
 
-def iniciar(clientes, lock_clientes, on_tick, on_atingido, log_fn):
+def iniciar(clientes, lock_clientes, on_tick, on_atingido, log_fn, on_municao=None):
     global _clientes_ref, _lock_clientes, _on_tick, _on_atingido
-    global _log_fn, _rodando, _thread
+    global _log_fn, _rodando, _thread, _on_municao
 
     _clientes_ref  = clientes
     _lock_clientes = lock_clientes
     _on_tick       = on_tick
     _on_atingido   = on_atingido
+    _on_municao    = on_municao
     _log_fn        = log_fn
     _rodando       = True
     _thread        = threading.Thread(target=_loop_tick, daemon=True)
     _thread.start()
 
-
 def parar():
     global _rodando
     _rodando = False
 
+# ── Munição ───────────────────────────────────────────────────────────────────
 
-def criar_projetil(x: int, y: int, direcao: str, time_atirador: str, apelido: str):
+def _get_mun(apelido: str) -> dict:
+    with _lock_mun:
+        if apelido not in _municao:
+            _municao[apelido] = {
+                "balas":            MAX_BALAS,
+                "recarregando_ate": 0.0,
+            }
+        return _municao[apelido]
+
+def pode_atirar(apelido: str) -> bool:
+    agora = time.time()
+    m = _get_mun(apelido)
+    with _lock_mun:
+        if agora < m["recarregando_ate"]:
+            return False
+        return m["balas"] > 0
+
+def _consumir_bala(apelido: str) -> int:
+    with _lock_mun:
+        m = _municao[apelido]
+        m["balas"] -= 1
+        if m["balas"] <= 0:
+            m["balas"] = 0
+            m["recarregando_ate"] = time.time() + TEMPO_RECARGA
+        return m["balas"]
+
+def balas_atuais(apelido: str) -> int:
+    with _lock_mun:
+        return _municao.get(apelido, {}).get("balas", MAX_BALAS)
+
+# ── Criação ───────────────────────────────────────────────────────────────────
+
+def criar_projetil(x: int, y: int, direcao: str,
+                   time_atirador: str, apelido: str, addr=None) -> bool:
+    """Retorna True se o tiro foi criado, False se bloqueado por cooldown/recarga."""
     if direcao not in DIRECOES:
-        return
+        return False
+    if not pode_atirar(apelido):
+        return False
+
     dx, dy = DIRECOES[direcao]
-    pid = str(uuid.uuid4())[:8]
+    pid    = str(uuid.uuid4())[:8]
+
+    restantes = _consumir_bala(apelido)
+
     with _lock_proj:
         _projeteis[pid] = {
             "x": x, "y": y,
@@ -57,17 +111,45 @@ def criar_projetil(x: int, y: int, direcao: str, time_atirador: str, apelido: st
             "atirador": apelido,
         }
 
+    if _on_municao and addr is not None:
+        _on_municao(addr, restantes)
+
+    return True
 
 def snapshot_projeteis() -> list[dict]:
     with _lock_proj:
         return [{"x": p["x"], "y": p["y"]} for p in _projeteis.values()]
 
+# ── Loop ──────────────────────────────────────────────────────────────────────
 
 def _loop_tick():
     while _rodando:
         time.sleep(TICK_SEGUNDOS)
+        _verificar_recargas()
         _tick()
 
+def _verificar_recargas():
+    """Detecta recargas concluídas e notifica os respectivos clientes."""
+    if _on_municao is None:
+        return
+    
+    agora = time.time()
+    concluidos = []
+
+    with _lock_mun:
+        for ap, m in _municao.items():
+            if m["balas"] == 0 and agora >= m["recarregando_ate"] > 0:
+                m["balas"] = MAX_BALAS
+                m["recarregando_ate"] = 0.0
+                concluidos.append(ap)
+
+    if not concluidos:
+        return
+
+    with _lock_clientes:
+        for addr, dados in list(_clientes_ref.items()):
+            if dados.get("apelido") in concluidos:
+                _on_municao(addr, MAX_BALAS)
 
 def _tick():
     remover = []
@@ -80,8 +162,8 @@ def _tick():
             if pid not in _projeteis:
                 continue
             proj = _projeteis[pid]
-            nx = proj["x"] + proj["dx"]
-            ny = proj["y"] + proj["dy"]
+            nx   = proj["x"] + proj["dx"]
+            ny   = proj["y"] + proj["dy"]
 
         from server.mapa import eh_parede
         if eh_parede(nx, ny):
@@ -94,7 +176,7 @@ def _tick():
 
         alvo_addr = None
         with _lock_clientes:
-            for addr, dados in _clientes_ref.items():
+            for addr, dados in list(_clientes_ref.items()):
                 if dados.get("time") is None:
                     continue
                 if dados["x"] == nx and dados["y"] == ny:
@@ -119,27 +201,36 @@ def _tick():
     if _on_tick:
         _on_tick()
 
-
 def _aplicar_dano(addr, atirador: str):
     with _lock_clientes:
         if addr not in _clientes_ref:
             return
         dados    = _clientes_ref[addr]
-        dados["hp"] -= DANO_PROJETIL
-        hp_atual = dados["hp"]
         apelido  = dados["apelido"]
         time_jog = dados["time"]
 
-        if hp_atual <= 0:
-            dados["hp"] = HP_INICIAL
+        # escudo absorve o hit
+        if dados.get("escudo"):
+            dados["escudo"] = False
+            if _log_fn:
+                _log_fn(f"🛡 {apelido} bloqueou tiro de {atirador}")
+            if _on_atingido:
+                _on_atingido(addr, dados["hp"], atirador)
+            return
 
-        sx, sy = Bases.spawn_time(time_jog, _clientes_ref)
-        if sx is not None:
-            dados["x"] = sx
-            dados["y"] = sy
+        dados["hp"] -= DANO_PROJETIL
+        hp_atual = dados["hp"]
+        morreu   = hp_atual <= 0
+
+        if morreu:
+            dados["hp"] = HP_INICIAL
+            sx, sy = Bases.spawn_time(time_jog, _clientes_ref)
+            if sx is not None:
+                dados["x"] = sx
+                dados["y"] = sy
 
     if _log_fn:
-        status = "morreu e voltou à base" if hp_atual <= 0 else f"atingido (HP={max(hp_atual,0)})"
+        status = "morreu e voltou à base" if morreu else f"atingido (HP={max(hp_atual, 0)})"
         _log_fn(f"💥 {apelido} {status} por {atirador}")
 
     if _on_atingido:

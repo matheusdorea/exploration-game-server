@@ -1,5 +1,5 @@
 """
-cliente.py  —  Entry point do cliente UDP.
+cliente.py — Entry point do cliente UDP.
 """
 import socket
 import threading
@@ -15,13 +15,17 @@ ADDR = (HOST, PORT)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-_lock    = threading.Lock()
-_rodando = True
-_ui: UI  = None
-_meu_time = ""
-_meu_hp   = 3
+_lock         = threading.Lock()
+_rodando      = True
+_ui: UI       = None
+_meu_time     = ""
+_meu_hp       = 3
+_meu_balas    = 5
+_meu_bandeira = False
+_meu_apelido  = ""
+_meu_ping = -1
 
-_aguardando = threading.Event()  # sinaliza eventos assíncronos para o loop principal
+_aguardando = threading.Event()
 
 TECLAS_MOVER = {
     "KEY_UP":    "cima",
@@ -37,25 +41,42 @@ TECLAS_ATIRAR = {
 }
 
 
-# ── Callbacks da thread de rede ───────────────────────────────────────────────
+# ── Callbacks ─────────────────────────────────────────────────────────────────
 def _on_mapa_estatico(payload: dict):
     if _ui:
         _ui.atualizar_mapa_estatico(payload)
 
-def _on_estado(payload: dict):
+def _on_ping(ms: int):
+    global _meu_ping
+    _meu_ping = ms
     if _ui:
+        _ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
+
+
+def _on_estado(payload: dict):
+    global _meu_bandeira
+    if _ui:
+        # verifica se somos portadores de alguma bandeira
+        bandeiras = payload.get("bandeiras", [])
+        portando  = any(b["portador"] == _meu_apelido for b in bandeiras)
+        if portando != _meu_bandeira:
+            _meu_bandeira = portando
+            _ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
         _ui.renderizar_estado(payload)
+
 
 def _on_msg(texto: str):
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(texto)
-        _aguardando.set()   # desbloqueia o loop se estiver esperando boas-vindas
+    _aguardando.set()
+
 
 def _on_erro(texto: str):
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(f"[!] {texto}")
+
 
 def _on_desligar():
     global _rodando
@@ -65,27 +86,39 @@ def _on_desligar():
     _rodando = False
     _aguardando.set()
 
+
 def _on_escolha_time(texto: str):
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(f"\n[Servidor] {texto}")
     _aguardando.set()
 
+
 def _on_atingido(hp: int, atirador: str):
     global _meu_hp
     _meu_hp = hp
-    msg = (f"☠ Eliminado por {atirador}! Voltando à base..."
-           if hp == 0 else
-           f"💥 Atingido por {atirador}! HP={hp}")
+    msg = (
+        f"☠ Eliminado por {atirador}! Voltando à base..."
+        if hp == 0 else
+        f"💥 Atingido por {atirador}! HP={hp}"
+    )
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(msg)
-            _ui.status_jogo(_meu_time, max(hp, 0))
+            _ui.status_jogo(_meu_time, max(hp, 0), _meu_balas, _meu_bandeira, _meu_ping)
+
+
+def _on_municao(qtd: int):
+    global _meu_balas
+    _meu_balas = qtd
+    if _ui:
+        _ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
-def main(stdscr=curses.initscr()):
-    global _rodando, _ui, _meu_time, _meu_hp
+def main(stdscr):
+    global _rodando, _ui, _meu_time, _meu_hp, _meu_apelido
+    global _meu_balas, _meu_bandeira
 
     try:
         ui = UI(stdscr)
@@ -100,9 +133,10 @@ def main(stdscr=curses.initscr()):
 
     # ── Apelido ───────────────────────────────────────────────────────────────
     apelido = ui.ler_texto("Apelido: ")
+    _meu_apelido = apelido
     sock.sendto(apelido.encode(), ADDR)
 
-    # ── Inicia receptor ───────────────────────────────────────────────────────
+    # ── Receptor ──────────────────────────────────────────────────────────────
     receptor = Receptor(
         sock,
         on_mapa_estatico = _on_mapa_estatico,
@@ -112,6 +146,8 @@ def main(stdscr=curses.initscr()):
         on_desligar      = _on_desligar,
         on_escolha_time  = _on_escolha_time,
         on_atingido      = _on_atingido,
+        on_municao       = _on_municao,
+        on_ping          = _on_ping,
     )
     receptor.iniciar()
 
@@ -129,22 +165,21 @@ def main(stdscr=curses.initscr()):
             break
         ui.adicionar_mensagem("[!] Digite A ou B.")
 
-    # ── Aguarda boas-vindas (msg_bv chega após mapa_estatico + estado) ────────
+    # ── Aguarda boas-vindas ───────────────────────────────────────────────────
     _aguardando.wait(timeout=10)
     _aguardando.clear()
     if not _rodando:
         receptor.parar(); sock.close(); return
 
-    _meu_hp = 3
-    ui.status_jogo(_meu_time, _meu_hp)
+    _meu_hp    = 3
+    _meu_balas = 5
+    ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
     ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  /sair=sair")
 
     # ── Loop de input ─────────────────────────────────────────────────────────
     while _rodando:
         try:
             tecla = ui.ler_tecla()
-        except curses.error:
-            continue
         except KeyboardInterrupt:
             break
 
