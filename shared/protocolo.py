@@ -1,8 +1,5 @@
 """
 shared/protocolo.py
-Alteração em relação à versão anterior:
-  - msg_estado() aceita parâmetro opcional `itens` (lista de posições públicas)
-  - Nenhum tipo novo adicionado — itens chegam embutidos no TIPO_ESTADO
 """
 import json
 
@@ -16,12 +13,17 @@ TIPO_MSG           = "msg"
 TIPO_ERRO          = "erro"
 TIPO_ESCOLHA       = "escolha"
 TIPO_ATINGIDO      = "atingido"
-TIPO_MAPA          = TIPO_ESTADO   # alias de compatibilidade
+TIPO_MUNICAO       = "municao"
+TIPO_BANDEIRA      = "bandeira"
+TIPO_PING          = "ping"
+TIPO_PONG          = "pong"
+TIPO_MAPA          = TIPO_ESTADO
 
 CMD_SAIR   = "/sair"
 CMD_MOVER  = "/mover"
 CMD_ATIRAR = "/atirar"
 CMD_TIME   = "/time"
+CMD_PONG   = "/pong"
 
 TIME_A = "A"
 TIME_B = "B"
@@ -46,13 +48,14 @@ def msg_mapa_estatico(linhas: int, colunas: int, mapa: list) -> bytes:
 def msg_bv(texto: str) -> bytes:
     return encode({"tipo": TIPO_BV, "texto": texto})
 
-def msg_estado(jogadores: dict, projeteis: list, itens: list = None) -> bytes:
-    # ITEM — itens incluídos como campo opcional; [] se não houver
+def msg_estado(jogadores: dict, projeteis: list,
+               itens: list = None, bandeiras: list = None) -> bytes:
     return encode({
         "tipo":      TIPO_ESTADO,
         "jogadores": jogadores,
         "projeteis": projeteis,
         "itens":     itens or [],
+        "bandeiras": bandeiras or [],
     })
 
 def msg_chat(texto: str) -> bytes:
@@ -67,3 +70,12 @@ def msg_escolha_time() -> bytes:
 
 def msg_atingido(hp: int, atirador: str) -> bytes:
     return encode({"tipo": TIPO_ATINGIDO, "hp": hp, "atirador": atirador})
+
+def msg_municao(qtd: int) -> bytes:
+    return encode({"tipo": TIPO_MUNICAO, "qtd": qtd})
+
+def msg_ping() -> bytes:
+    return encode({"tipo": TIPO_PING})
+
+def msg_pong() -> bytes:
+    return encode({"tipo": TIPO_PONG})

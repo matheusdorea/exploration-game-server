@@ -10,7 +10,7 @@ from server import bases as Bases
 
 # ┌─────────────────────────────────────────────────────────────────────────────┐
 # │  CONFIGURAÇÃO DO MAPA — altere aqui para redimensionar                      │
-MAPA_LINHAS  = 30
+MAPA_LINHAS  = 17
 MAPA_COLUNAS = 60
 # └─────────────────────────────────────────────────────────────────────────────┘
 
@@ -22,7 +22,6 @@ CELULA_LIVRE  = 0
 CELULA_PAREDE = 1
 CELULA_BASE_A = 2
 CELULA_BASE_B = 3
-
 
 def _criar_mapa() -> list[list[int]]:
     mapa = []
@@ -42,9 +41,7 @@ def _criar_mapa() -> list[list[int]]:
         mapa.append(linha)
     return mapa
 
-
 _mapa: list[list[int]] = _criar_mapa()
-
 
 # ── Consultas ─────────────────────────────────────────────────────────────────
 def eh_parede(x: int, y: int) -> bool:
@@ -52,11 +49,8 @@ def eh_parede(x: int, y: int) -> bool:
         return True
     return _mapa[y][x] == CELULA_PAREDE
 
-
 def celula_livre(x: int, y: int, clientes: dict, time_jogador: str = None) -> bool:
     if eh_parede(x, y):
-        return False
-    if time_jogador and not Bases.pode_entrar(x, y, time_jogador):
         return False
     for dados in clientes.values():
         if dados.get("time") is None:
@@ -65,10 +59,8 @@ def celula_livre(x: int, y: int, clientes: dict, time_jogador: str = None) -> bo
             return False
     return True
 
-
 def posicao_inicial(clientes: dict, time: str) -> tuple[int | None, int | None]:
     return Bases.spawn_time(time, clientes)
-
 
 # ── Movimento ─────────────────────────────────────────────────────────────────
 def mover_jogador(addr, direcao: str, clientes: dict) -> bool:
@@ -86,7 +78,6 @@ def mover_jogador(addr, direcao: str, clientes: dict) -> bool:
     dados["y"] = ny
     return True
 
-
 # ── Snapshots ─────────────────────────────────────────────────────────────────
 def snapshot_estatico() -> dict:
     """
@@ -98,7 +89,6 @@ def snapshot_estatico() -> dict:
         "colunas": MAPA_COLUNAS,
         "mapa":    _mapa,
     }
-
 
 def snapshot_estado(clientes: dict, projeteis: list = None) -> tuple[dict, list]:
     """
