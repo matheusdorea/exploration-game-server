@@ -86,9 +86,11 @@ def spawn_time(time: str, clientes: dict) -> tuple[int | None, int | None]:
 
     ocupadas = {(d["x"], d["y"]) for d in clientes.values()}
 
+    from server import mapa
+    
     for y in range(BASE_Y_MIN, BASE_Y_MAX + 1):
         for x in xs:
-            if (x, y) not in ocupadas:
+            if (x, y) not in ocupadas and not mapa.eh_parede(x, y):
                 return x, y
 
     return None, None

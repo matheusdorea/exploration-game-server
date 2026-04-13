@@ -25,12 +25,17 @@ CELULA_BASE_B = 3
 
 def _criar_mapa() -> list[list[int]]:
     mapa = []
+    centro_y = (Bases.BASE_Y_MIN + Bases.BASE_Y_MAX) // 2
     for r in range(MAPA_LINHAS):
         linha = []
         for c in range(MAPA_COLUNAS):
             eh_borda = (r == 0 or r == MAPA_LINHAS - 1 or
                         c == 0 or c == MAPA_COLUNAS - 1)
-            if eh_borda:
+            
+            eh_parede_base_a = (c == Bases.BASE_A_X_MAX) and not (centro_y - 2 <= r <= centro_y + 2)
+            eh_parede_base_b = (c == Bases.BASE_B_X_MIN) and not (centro_y - 2 <= r <= centro_y + 2)
+            
+            if eh_borda or eh_parede_base_a or eh_parede_base_b:
                 linha.append(CELULA_PAREDE)
             elif Bases.eh_base(c, r) == "A":
                 linha.append(CELULA_BASE_A)
