@@ -2,14 +2,22 @@
 server/conexoes.py
 Aceita pacotes UDP, registra jogadores e despacha comandos.
 
-Extras:
-  - Ping periódico: clientes sem pong em TIMEOUT_MS são kickados.
-  - Munição/recarga via projeteis.py.
-  - CTF via bandeiras.py.
-  - Itens aleatórios via itens.py.
+Balanceamento de carga via ThreadPoolExecutor:
+  - O loop de recebimento é apenas um dispatcher — recebe, classifica,
+    submete. Nunca processa inline.
+  - Cada pacote vira uma Future independente na pool.
+  - Tarefas lentas (coleta de item, CTF) não bloqueiam pacotes seguintes.
+  - Tamanho da pool configurável via POOL_WORKERS (padrão: 4).
+
+Threads que já existiam e continuam separadas:
+  - loop_recebimento  → dispatcher UDP (1 thread dedicada)
+  - projeteis._thread → tick de física (1 thread dedicada)
+  - _loop_ping        → keepalive periódico (1 thread dedicada)
+  - ThreadPoolExecutor → workers de lógica de jogo (POOL_WORKERS threads)
 """
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 
 from shared import protocolo as proto
 from server import mapa      as Mapa
@@ -18,30 +26,44 @@ from server import bases     as Bases
 from server import itens     as Itens
 from server import bandeiras as Bandeiras
 
+# ── Configuração da pool ──────────────────────────────────────────────────────
+# Regra prática: 2–4× o número de cores lógicos é um bom ponto de partida
+# para workloads mistos (I/O leve + lógica de jogo).
+# Pode ser ajustado via variável de ambiente POOL_WORKERS.
+import os
+POOL_WORKERS = int(os.environ.get("POOL_WORKERS", 4))
+
 lock = threading.Lock()
-clientes: dict = {}          # addr → dados do jogador
-_aguardando_time: dict = {}  # addr → apelido (ainda escolhendo time)
+clientes: dict = {}
+_aguardando_time: dict = {}
 
 _socket  = None
 _log_fn  = None
 _rodando = True
+_pool: ThreadPoolExecutor = None
 
 _itens: dict = {}
 
 # ── Ping / timeout ────────────────────────────────────────────────────────────
-TIMEOUT_MS    = 5000          # ms sem pong → kick
-PING_INTERVAL = 0           # segundos entre pings
+TIMEOUT_MS    = 5000
+PING_INTERVAL = 2
 
-# addr → timestamp (segundos) do último pong recebido
 _ultimo_pong: dict = {}
 _lock_pong = threading.Lock()
 
 # ── Inicialização ─────────────────────────────────────────────────────────────
 def iniciar(sock, log_fn):
-    global _socket, _log_fn, _itens
+    global _socket, _log_fn, _itens, _pool
 
     _socket = sock
     _log_fn = log_fn
+
+    # Cria a pool antes de qualquer worker precisar dela
+    _pool = ThreadPoolExecutor(
+        max_workers=POOL_WORKERS,
+        thread_name_prefix="game-worker",
+    )
+    _log(f"[POOL] ThreadPoolExecutor iniciada com {POOL_WORKERS} workers.")
 
     _itens = Itens.gerar_itens(Mapa.MAPA_LINHAS, Mapa.MAPA_COLUNAS)
     _log(f"[ITENS] {len(_itens)} itens gerados no campo.")
@@ -70,14 +92,18 @@ def iniciar(sock, log_fn):
         on_municao    = _notificar_municao,
     )
 
-    # thread de ping
     t = threading.Thread(target=_loop_ping, daemon=True)
     t.start()
+
 
 def parar():
     global _rodando
     _rodando = False
     Projeteis.parar()
+    if _pool:
+        # Aguarda tasks em andamento terminarem (até 2 s) antes de fechar
+        _pool.shutdown(wait=True, cancel_futures=False)
+
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 def _log(msg: str):
@@ -108,7 +134,6 @@ def _broadcast_estado(exceto=None):
         if addr != exceto:
             _enviar(addr, dados)
 
-
 def _broadcast_chat(texto: str, exceto=None):
     dados = proto.msg_chat(texto)
     for addr in list(clientes):
@@ -117,7 +142,6 @@ def _broadcast_chat(texto: str, exceto=None):
 
 def _notificar_atingido(addr, hp: int, atirador: str):
     _enviar(addr, proto.msg_atingido(hp, atirador))
-    # drop de bandeira se for portador
     with lock:
         if addr not in clientes:
             return
@@ -130,7 +154,7 @@ def _notificar_municao(addr, qtd: int):
 
 def _loop_ping():
     while _rodando:
-        agora = time.time()
+        agora     = time.time()
         ping_data = proto.msg_ping()
 
         with lock:
@@ -142,7 +166,7 @@ def _loop_ping():
         time.sleep(PING_INTERVAL)
 
         agora_verif = time.time()
-        expirados = []
+        expirados   = []
         with _lock_pong:
             for addr in addrs:
                 ultimo = _ultimo_pong.get(addr, 0)
@@ -151,19 +175,23 @@ def _loop_ping():
 
         for addr in expirados:
             _log(f"[TIMEOUT] {addr} sem resposta — kickando.")
-            _desconectar(addr, motivo="saiu por timeout")
+            # Submete o kick na pool para não bloquear o ping thread
+            if _pool:
+                _pool.submit(_desconectar, addr, "saiu por timeout")
 
 def _registrar_pong(addr):
     with _lock_pong:
         _ultimo_pong[addr] = time.time()
 
-# ── Handlers ──────────────────────────────────────────────────────────────────
+
+# ── Handlers (executados pelos workers da pool) ───────────────────────────────
 def _registrar_jogador(addr, apelido: str):
     _aguardando_time[addr] = apelido
     with _lock_pong:
         _ultimo_pong[addr] = time.time()
     _log(f"[?] {apelido} conectou {addr} — aguardando time")
     _enviar(addr, proto.msg_escolha_time())
+
 
 def _confirmar_time(addr, time: str):
     time = time.upper()
@@ -204,6 +232,7 @@ def _confirmar_time(addr, time: str):
     with lock:
         _broadcast_estado(exceto=addr)
 
+
 def _desconectar(addr, motivo: str = "saiu"):
     _aguardando_time.pop(addr, None)
     with _lock_pong:
@@ -217,9 +246,9 @@ def _desconectar(addr, motivo: str = "saiu"):
         _broadcast_chat(f"[Servidor] {apelido} {motivo}.")
         _broadcast_estado_todos()
 
+
 def _processar_movimento(addr, direcao: str):
     item_coletado = None
-    ctf_result    = None
 
     with lock:
         if addr not in clientes:
@@ -229,7 +258,7 @@ def _processar_movimento(addr, direcao: str):
             jog = clientes[addr]
             item_coletado = Itens.verificar_coleta(jog, _itens, log_fn=_log)
             Bandeiras.atualizar_posicao_portador(jog["apelido"], jog["x"], jog["y"])
-            ctf_result = Bandeiras.verificar_interacao(jog, clientes)
+            Bandeiras.verificar_interacao(jog, clientes)
 
     if not moveu:
         _enviar(addr, proto.msg_erro("Movimento inválido."))
@@ -240,10 +269,13 @@ def _processar_movimento(addr, direcao: str):
     if item_coletado:
         tipo   = _itens[item_coletado]["tipo"]
         efeito = "+1 HP" if tipo == "cura" else "escudo ativado"
-        _enviar(addr, proto.msg_chat(f"[Item] Você coletou {item_coletado} ({efeito})!"))
+        _enviar(addr, proto.msg_chat(
+            f"[Item] Você coletou {item_coletado} ({efeito})!"
+        ))
         with lock:
             nome = clientes[addr]["apelido"] if addr in clientes else "?"
         _broadcast_chat(f"[Item] {nome} coletou {item_coletado}!", exceto=addr)
+
 
 def _processar_tiro(addr, direcao: str):
     with lock:
@@ -262,6 +294,7 @@ def _processar_tiro(addr, direcao: str):
     else:
         _enviar(addr, proto.msg_erro("Sem balas! Aguarde recarga."))
 
+
 def _processar_chat(addr, texto: str):
     with lock:
         if addr not in clientes:
@@ -270,44 +303,70 @@ def _processar_chat(addr, texto: str):
     _log(f"{apelido}: {texto}")
     _broadcast_chat(f"{apelido}: {texto}", exceto=addr)
 
-# ── Loop de recebimento ────────────────────────────────────────────────────────
+
+# ── Loop de recebimento — apenas dispatcher ───────────────────────────────────
 def loop_recebimento():
+    """
+    Esta thread NUNCA processa lógica de jogo.
+    Só recebe, identifica o tipo de pacote e submete o handler correto
+    à ThreadPoolExecutor. Isso garante que um pacote lento não atrase
+    os seguintes — o loop volta a escutar imediatamente.
+    """
     global _rodando
     while _rodando:
         try:
             data, addr = _socket.recvfrom(proto.BUFFERSIZE)
             msg = data.decode().strip()
 
-            # pong de qualquer addr registrado
+            # ── Pong é tratado inline (µs, sem lógica) ────────────────────────
             if msg == proto.CMD_PONG:
                 _registrar_pong(addr)
                 continue
 
+            # ── Novo cliente ──────────────────────────────────────────────────
             if addr not in clientes and addr not in _aguardando_time:
-                _registrar_jogador(addr, apelido=msg)
+                _pool.submit(_registrar_jogador, addr, msg)
                 continue
 
-            # atualiza pong para addrs já registrados
+            # Atualiza keepalive para clientes registrados
             _registrar_pong(addr)
 
+            # ── Escolha de time (cliente ainda não entrou) ────────────────────
             if addr in _aguardando_time:
                 if msg.startswith(proto.CMD_TIME + " "):
-                    _confirmar_time(addr, msg[len(proto.CMD_TIME) + 1:])
+                    _pool.submit(
+                        _confirmar_time,
+                        addr,
+                        msg[len(proto.CMD_TIME) + 1:],
+                    )
                 else:
-                    _enviar(addr, proto.msg_escolha_time())
+                    _pool.submit(_enviar, addr, proto.msg_escolha_time())
                 continue
 
+            # ── Comandos de jogo ──────────────────────────────────────────────
             if msg == proto.CMD_SAIR:
-                _desconectar(addr, motivo="saiu")
+                _pool.submit(_desconectar, addr, "saiu")
+
             elif msg.startswith(proto.CMD_MOVER + " "):
-                _processar_movimento(addr, msg[len(proto.CMD_MOVER) + 1:])
+                _pool.submit(
+                    _processar_movimento,
+                    addr,
+                    msg[len(proto.CMD_MOVER) + 1:],
+                )
+
             elif msg.startswith(proto.CMD_ATIRAR + " "):
-                _processar_tiro(addr, msg[len(proto.CMD_ATIRAR) + 1:])
+                _pool.submit(
+                    _processar_tiro,
+                    addr,
+                    msg[len(proto.CMD_ATIRAR) + 1:],
+                )
+
             else:
-                _processar_chat(addr, msg)
+                _pool.submit(_processar_chat, addr, msg)
 
         except OSError:
             break
+
 
 # ── Admin ──────────────────────────────────────────────────────────────────────
 def desligar():
@@ -318,11 +377,14 @@ def desligar():
     parar()
     _socket.close()
 
+
 def listar_online() -> str:
     with lock:
         if not clientes:
             return "  Nenhum jogador conectado."
         linhas = []
+        workers_ativos = _pool._work_queue.qsize() if _pool else 0
+        linhas.append(f"  [Pool] tasks na fila: {workers_ativos}")
         for d in clientes.values():
             escudo = " 🛡" if d.get("escudo") else ""
             linhas.append(
@@ -330,6 +392,7 @@ def listar_online() -> str:
                 f"pos:({d['x']},{d['y']})  HP:{d['hp']}{escudo}"
             )
         return "\n".join(linhas)
+
 
 def broadcast_admin(texto: str):
     _broadcast_chat(f"[Servidor]: {texto}")
