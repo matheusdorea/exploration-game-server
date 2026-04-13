@@ -14,6 +14,13 @@ Verificação de versão:
   - Clientes com versão diferente são rejeitados antes de entrar no jogo.
   - Para atualizar o protocolo: incremente VERSAO aqui e redistribua
     shared/protocolo.py para todos os participantes.
+
+RTT real:
+  - Cliente envia CMD_PING_CLIENTE com timestamp (float, segundos).
+  - Servidor ecoa de volta com TIPO_PONG_SERVIDOR contendo o mesmo timestamp.
+  - Cliente calcula RTT = time.time() - timestamp_ecoado.
+  - Isso mede o round-trip real da rede, independente do intervalo de ping
+    do servidor.
 """
 import json
 
@@ -21,8 +28,7 @@ BUFFERSIZE        = 65507
 BUFFERSIZE_ESTADO = 8192
 
 # ── Versão do protocolo ───────────────────────────────────────────────────────
-# Incrementar MAJOR em mudanças incompatíveis, MINOR em adições retrocompatíveis.
-VERSAO = "1.2"
+VERSAO = "1.1"
 
 # ── Tipos de payload ──────────────────────────────────────────────────────────
 TIPO_BV              = "bv"
@@ -33,17 +39,19 @@ TIPO_ERRO            = "erro"
 TIPO_ESCOLHA         = "escolha"
 TIPO_PING            = "ping"
 TIPO_PONG            = "pong"
-TIPO_VERSAO_OK       = "versao_ok"   # servidor aceita a versão do cliente
-TIPO_VERSAO_INVALIDA = "versao_inv"  # servidor rejeita — cliente deve encerrar
+TIPO_VERSAO_OK       = "versao_ok"
+TIPO_VERSAO_INVALIDA = "versao_inv"
+TIPO_PONG_SERVIDOR   = "pong_srv"   # resposta do servidor ao ping RTT do cliente
 
 TIPO_MAPA = TIPO_ESTADO  # alias de compatibilidade
 
 # ── Comandos do cliente ───────────────────────────────────────────────────────
-CMD_SAIR   = "/sair"
-CMD_MOVER  = "/mover"
-CMD_ATIRAR = "/atirar"
-CMD_TIME   = "/time"
-CMD_PONG   = "/pong"
+CMD_SAIR          = "/sair"
+CMD_MOVER         = "/mover"
+CMD_ATIRAR        = "/atirar"
+CMD_TIME          = "/time"
+CMD_PONG          = "/pong"
+CMD_PING_CLIENTE  = "/pingc"   # ping RTT iniciado pelo cliente (payload JSON)
 
 # ── Times ─────────────────────────────────────────────────────────────────────
 TIME_A = "A"
@@ -66,17 +74,9 @@ def decode(data: bytes) -> dict:
 
 # ── Primeiro pacote do cliente ────────────────────────────────────────────────
 def encode_handshake(apelido: str) -> bytes:
-    """
-    Substitui o envio simples de apelido.encode().
-    Inclui a versão do protocolo para validação server-side.
-    """
     return encode({"apelido": apelido, "versao": VERSAO})
 
 def decode_handshake(data: bytes) -> tuple[str, str]:
-    """
-    Retorna (apelido, versao). Se o pacote for texto puro (cliente antigo),
-    retorna (texto, "") — o servidor rejeitará por versão ausente.
-    """
     try:
         payload = decode(data)
         return payload.get("apelido", ""), payload.get("versao", "")
@@ -138,3 +138,12 @@ def msg_escolha_time() -> bytes:
 
 def msg_ping() -> bytes:
     return encode({"tipo": TIPO_PING})
+
+# ── RTT real ──────────────────────────────────────────────────────────────────
+def encode_ping_cliente(timestamp: float) -> bytes:
+    """Ping RTT enviado pelo cliente. O servidor ecoa o timestamp de volta."""
+    return f"{CMD_PING_CLIENTE} {timestamp}".encode()
+
+def msg_pong_servidor(timestamp: float) -> bytes:
+    """Resposta do servidor ao ping RTT do cliente, ecoando o timestamp."""
+    return encode({"tipo": TIPO_PONG_SERVIDOR, "ts": timestamp})

@@ -4,6 +4,18 @@ cliente.py — Entry point do cliente UDP.
 Responsabilidade do cliente: enviar intenções e renderizar o estado
 que o servidor manda. Nenhum valor de jogo (HP, balas, bandeira) é
 calculado ou guardado aqui — tudo vem do campo "meu_estado" do servidor.
+
+Chat:
+  - Enter ativa o modo chat (painel_chat_input dedicado).
+  - WASD/setas NÃO disparam ações enquanto o chat está aberto.
+  - Escape cancela o input sem enviar nada.
+
+RTT real:
+  - Uma thread dedicada envia CMD_PING_CLIENTE com timestamp a cada
+    RTT_INTERVAL_S segundos.
+  - O servidor ecoa o timestamp de volta em TIPO_PONG_SERVIDOR.
+  - _on_pong_servidor calcula RTT = agora - timestamp_ecoado e aplica
+    média móvel exponencial para estabilizar o valor exibido.
 """
 import socket
 import threading
@@ -27,9 +39,13 @@ _apelido   = ""
 _meu_time  = ""
 _aguardando = threading.Event()
 
-_ping_ms      = -1
-_ping_enviado = 0.0
-_lock_ping    = threading.Lock()
+# ── RTT real ──────────────────────────────────────────────────────────────────
+RTT_INTERVAL_S = 1.0    # intervalo entre pings RTT do cliente
+RTT_ALPHA      = 0.2    # suavização: menor = mais estável, maior = mais reativo
+
+_ping_ms       = -1
+_ping_suavizado = -1.0
+_lock_ping     = threading.Lock()
 
 
 # ── Callbacks da thread de rede ───────────────────────────────────────────────
@@ -74,23 +90,27 @@ def _on_escolha_time(texto: str):
     _aguardando.set()
 
 def _on_ping():
-    global _ping_ms, _ping_enviado
-    agora = time.time()
-    with _lock_ping:
-        if _ping_enviado > 0:
-            _ping_ms = int((agora - _ping_enviado) * 1000)
-        _ping_enviado = agora          # registra o momento do envio
+    """Keepalive do servidor — responde pong para não ser kickado por timeout."""
     sock.sendto(proto.CMD_PONG.encode(), ADDR)
 
+def _on_pong_servidor(ts: float):
+    """Resposta ao nosso ping RTT — calcula e suaviza o valor."""
+    global _ping_ms, _ping_suavizado
+    rtt = (time.time() - ts) * 1000
+    with _lock_ping:
+        if _ping_suavizado < 0:
+            _ping_suavizado = rtt
+        else:
+            _ping_suavizado = RTT_ALPHA * rtt + (1 - RTT_ALPHA) * _ping_suavizado
+        _ping_ms = int(_ping_suavizado)
+
 def _on_versao_ok():
-    """Servidor aceitou a versão — desbloqueia o fluxo de login."""
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(f"[✓] Versão {proto.VERSAO} aceita pelo servidor.")
     _aguardando.set()
 
 def _on_versao_invalida(versao_servidor: str, texto: str):
-    """Servidor rejeitou a versão — exibe erro e encerra."""
     global _rodando
     mensagem = (
         texto or
@@ -103,6 +123,17 @@ def _on_versao_invalida(versao_servidor: str, texto: str):
             _ui.adicionar_mensagem(f"[ERRO DE VERSÃO] {mensagem}")
     _rodando = False
     _aguardando.set()
+
+
+# ── Thread de ping RTT ────────────────────────────────────────────────────────
+def _loop_ping_rtt():
+    """Envia pings com timestamp para medir o RTT real da rede."""
+    while _rodando:
+        try:
+            sock.sendto(proto.encode_ping_cliente(time.time()), ADDR)
+        except OSError:
+            break
+        time.sleep(RTT_INTERVAL_S)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -139,6 +170,7 @@ def main(stdscr):
         on_ping            = _on_ping,
         on_versao_ok       = _on_versao_ok,
         on_versao_invalida = _on_versao_invalida,
+        on_pong_servidor   = _on_pong_servidor,
     )
     receptor.iniciar()
 
@@ -174,6 +206,9 @@ def main(stdscr):
     if not _rodando:
         receptor.parar(); sock.close(); return
 
+    # ── Inicia thread de ping RTT ─────────────────────────────────────────────
+    threading.Thread(target=_loop_ping_rtt, daemon=True).start()
+
     ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  Enter=chat  │  /sair=sair")
 
     # ── Loop de input ─────────────────────────────────────────────────────────
@@ -202,7 +237,7 @@ def main(stdscr):
             sock.sendto(f"{proto.CMD_ATIRAR} {TECLAS_ATIRAR[tecla]}".encode(), ADDR)
             continue
 
-        # Enter ativa o modo chat — WASD e setas ficam desativados até confirmar
+        # Enter ativa o modo chat
         if tecla in ("\n", "\r", "KEY_ENTER"):
             texto = ui.ler_chat("> ")
             if not texto:
