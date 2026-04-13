@@ -16,55 +16,40 @@ ADDR = (HOST, PORT)
 
 sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
 
-_lock         = threading.Lock()
-_rodando      = True
-_ui: UI       = None
-_meu_time     = ""
-_meu_hp       = 3
-_meu_balas    = 5
-_meu_bandeira = False
-_meu_apelido  = ""
-_meu_ping = -1
-
+_lock      = threading.Lock()
+_rodando   = True
+_ui: UI    = None
+_apelido   = ""
+_meu_time  = ""   # recebido do servidor na boas-vindas, usado só para UI
 _aguardando = threading.Event()
 
-TECLAS_MOVER = {
-    "KEY_UP":    "cima",
-    "KEY_DOWN":  "baixo",
-    "KEY_LEFT":  "esq",
-    "KEY_RIGHT": "dir",
-}
-TECLAS_ATIRAR = {
-    "w": "cima",  "W": "cima",
-    "s": "baixo", "S": "baixo",
-    "a": "esq",   "A": "esq",
-    "d": "dir",   "D": "dir",
-}
+# Ping medido localmente (legítimo — é uma medição de rede, não estado de jogo)
+_ping_ms       = -1
+_ping_enviado  = 0.0
+_lock_ping     = threading.Lock()
 
 
-# ── Callbacks ─────────────────────────────────────────────────────────────────
+# ── Callbacks da thread de rede ───────────────────────────────────────────────
 def _on_mapa_estatico(payload: dict):
     if _ui:
         _ui.atualizar_mapa_estatico(payload)
 
-def _on_ping(ms: int):
-    global _meu_ping
-    _meu_ping = ms
-    if _ui:
-        _ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
-
-
 def _on_estado(payload: dict):
-    global _meu_bandeira
-    if _ui:
-        # verifica se somos portadores de alguma bandeira
-        bandeiras = payload.get("bandeiras", [])
-        portando  = any(b["portador"] == _meu_apelido for b in bandeiras)
-        if portando != _meu_bandeira:
-            _meu_bandeira = portando
-            _ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
-        _ui.renderizar_estado(payload)
+    """
+    Renderiza o mapa e atualiza a status bar com os valores do servidor.
+    meu_estado = { hp, balas, escudo, bandeira, time } — autoritativo.
+    """
+    if not _ui:
+        return
 
+    meu = payload.get("meu_estado", {})
+    hp       = meu.get("hp",       "?")
+    balas    = meu.get("balas",    "?")
+    bandeira = meu.get("bandeira", False)
+    time_j   = meu.get("time",     _meu_time)
+
+    _ui.renderizar_estado(payload)
+    _ui.status_jogo(time_j, hp, balas, bandeira, _ping_ms)
 
 def _on_msg(texto: str):
     if _ui:
@@ -72,12 +57,10 @@ def _on_msg(texto: str):
             _ui.adicionar_mensagem(texto)
     _aguardando.set()
 
-
 def _on_erro(texto: str):
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(f"[!] {texto}")
-
 
 def _on_desligar():
     global _rodando
@@ -87,39 +70,26 @@ def _on_desligar():
     _rodando = False
     _aguardando.set()
 
-
 def _on_escolha_time(texto: str):
     if _ui:
         with _lock:
             _ui.adicionar_mensagem(f"\n[Servidor] {texto}")
     _aguardando.set()
 
-
-def _on_atingido(hp: int, atirador: str):
-    global _meu_hp
-    _meu_hp = hp
-    msg = (
-        f"☠ Eliminado por {atirador}! Voltando à base..."
-        if hp == 0 else
-        f"💥 Atingido por {atirador}! HP={hp}"
-    )
-    if _ui:
-        with _lock:
-            _ui.adicionar_mensagem(msg)
-            _ui.status_jogo(_meu_time, max(hp, 0), _meu_balas, _meu_bandeira, _meu_ping)
-
-
-def _on_municao(qtd: int):
-    global _meu_balas
-    _meu_balas = qtd
-    if _ui:
-        _ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
+def _on_ping():
+    """Servidor enviou ping — responde com pong e mede RTT."""
+    global _ping_ms
+    sock.sendto(proto.CMD_PONG.encode(), ADDR)
+    with _lock_ping:
+        if _ping_enviado > 0:
+            _ping_ms = int((time.time() - _ping_enviado) * 1000)
+            # Próximo ping: marca o envio agora para medir o próximo ciclo
+            # (simples: usamos o timestamp do recebimento como referência)
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
 def main(stdscr):
-    global _rodando, _ui, _meu_time, _meu_hp, _meu_apelido
-    global _meu_balas, _meu_bandeira
+    global _rodando, _ui, _meu_time, _apelido
 
     try:
         ui = UI(stdscr)
@@ -134,7 +104,7 @@ def main(stdscr):
 
     # ── Apelido ───────────────────────────────────────────────────────────────
     apelido = ui.ler_texto("Apelido: ")
-    _meu_apelido = apelido
+    _apelido = apelido
     sock.sendto(apelido.encode(), ADDR)
 
     # ── Receptor ──────────────────────────────────────────────────────────────
@@ -146,13 +116,11 @@ def main(stdscr):
         on_erro          = _on_erro,
         on_desligar      = _on_desligar,
         on_escolha_time  = _on_escolha_time,
-        on_atingido      = _on_atingido,
-        on_municao       = _on_municao,
         on_ping          = _on_ping,
     )
     receptor.iniciar()
 
-    # ── Aguarda pedido de time ────────────────────────────────────────────────
+    # ── Escolha de time ───────────────────────────────────────────────────────
     _aguardando.wait(timeout=10)
     _aguardando.clear()
     if not _rodando:
@@ -162,22 +130,17 @@ def main(stdscr):
         escolha = ui.ler_texto("Seu time (A ou B): ").strip().upper()
         if escolha in ("A", "B"):
             sock.sendto(f"{proto.CMD_TIME} {escolha}".encode(), ADDR)
-            _meu_time = escolha
+            _meu_time = escolha   # usado apenas como fallback de UI até o 1º estado
             break
         ui.adicionar_mensagem("[!] Digite A ou B.")
 
-    # ── Aguarda boas-vindas ───────────────────────────────────────────────────
+    # ── Aguarda boas-vindas + 1º estado ──────────────────────────────────────
     _aguardando.wait(timeout=10)
     _aguardando.clear()
     if not _rodando:
         receptor.parar(); sock.close(); return
 
-    _meu_hp    = 3
-    _meu_balas = 5
-    ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
     ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  /sair=sair")
-
-    _ultimo_movimento = 0.0
 
     # ── Loop de input ─────────────────────────────────────────────────────────
     while _rodando:
@@ -186,17 +149,35 @@ def main(stdscr):
         except KeyboardInterrupt:
             break
 
-        if tecla in TECLAS_MOVER:
-            agora = time.time()
-            if agora - _ultimo_movimento >= 0.1:  
-                _ultimo_movimento = agora
-                sock.sendto(f"{proto.CMD_MOVER} {TECLAS_MOVER[tecla]}".encode(), ADDR)
+        # Movimento — sem throttle local, servidor decide
+        if tecla in {
+            "KEY_UP": "cima", "KEY_DOWN": "baixo",
+            "KEY_LEFT": "esq", "KEY_RIGHT": "dir",
+        }:
+            direcao = {
+                "KEY_UP": "cima", "KEY_DOWN": "baixo",
+                "KEY_LEFT": "esq", "KEY_RIGHT": "dir",
+            }[tecla]
+            sock.sendto(f"{proto.CMD_MOVER} {direcao}".encode(), ADDR)
             continue
 
-        if tecla in TECLAS_ATIRAR:
-            sock.sendto(f"{proto.CMD_ATIRAR} {TECLAS_ATIRAR[tecla]}".encode(), ADDR)
+        # Tiro
+        if tecla in {
+            "w": "cima", "W": "cima",
+            "s": "baixo", "S": "baixo",
+            "a": "esq",   "A": "esq",
+            "d": "dir",   "D": "dir",
+        }:
+            direcao = {
+                "w": "cima", "W": "cima",
+                "s": "baixo", "S": "baixo",
+                "a": "esq",   "A": "esq",
+                "d": "dir",   "D": "dir",
+            }[tecla]
+            sock.sendto(f"{proto.CMD_ATIRAR} {direcao}".encode(), ADDR)
             continue
 
+        # Comando de texto (/, chat)
         if tecla == "/":
             texto = "/" + ui.ler_texto("> /")
             texto = texto.strip()
