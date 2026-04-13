@@ -1,5 +1,9 @@
 """
 cliente.py — Entry point do cliente UDP.
+
+Responsabilidade do cliente: enviar intenções e renderizar o estado
+que o servidor manda. Nenhum valor de jogo (HP, balas, bandeira) é
+calculado ou guardado aqui — tudo vem do campo "meu_estado" do servidor.
 """
 import socket
 import threading
@@ -20,13 +24,12 @@ _lock      = threading.Lock()
 _rodando   = True
 _ui: UI    = None
 _apelido   = ""
-_meu_time  = ""   # recebido do servidor na boas-vindas, usado só para UI
+_meu_time  = ""
 _aguardando = threading.Event()
 
-# Ping medido localmente (legítimo — é uma medição de rede, não estado de jogo)
-_ping_ms       = -1
-_ping_enviado  = 0.0
-_lock_ping     = threading.Lock()
+_ping_ms      = -1
+_ping_enviado = 0.0
+_lock_ping    = threading.Lock()
 
 
 # ── Callbacks da thread de rede ───────────────────────────────────────────────
@@ -35,19 +38,13 @@ def _on_mapa_estatico(payload: dict):
         _ui.atualizar_mapa_estatico(payload)
 
 def _on_estado(payload: dict):
-    """
-    Renderiza o mapa e atualiza a status bar com os valores do servidor.
-    meu_estado = { hp, balas, escudo, bandeira, time } — autoritativo.
-    """
     if not _ui:
         return
-
-    meu = payload.get("meu_estado", {})
+    meu      = payload.get("meu_estado", {})
     hp       = meu.get("hp",       "?")
     balas    = meu.get("balas",    "?")
     bandeira = meu.get("bandeira", False)
     time_j   = meu.get("time",     _meu_time)
-
     _ui.renderizar_estado(payload)
     _ui.status_jogo(time_j, hp, balas, bandeira, _ping_ms)
 
@@ -77,14 +74,33 @@ def _on_escolha_time(texto: str):
     _aguardando.set()
 
 def _on_ping():
-    """Servidor enviou ping — responde com pong e mede RTT."""
     global _ping_ms
     sock.sendto(proto.CMD_PONG.encode(), ADDR)
     with _lock_ping:
         if _ping_enviado > 0:
             _ping_ms = int((time.time() - _ping_enviado) * 1000)
-            # Próximo ping: marca o envio agora para medir o próximo ciclo
-            # (simples: usamos o timestamp do recebimento como referência)
+
+def _on_versao_ok():
+    """Servidor aceitou a versão — desbloqueia o fluxo de login."""
+    if _ui:
+        with _lock:
+            _ui.adicionar_mensagem(f"[✓] Versão {proto.VERSAO} aceita pelo servidor.")
+    _aguardando.set()
+
+def _on_versao_invalida(versao_servidor: str, texto: str):
+    """Servidor rejeitou a versão — exibe erro e encerra."""
+    global _rodando
+    mensagem = (
+        texto or
+        f"Versão incompatível. "
+        f"Seu cliente: {proto.VERSAO} | Servidor: {versao_servidor}. "
+        f"Atualize seu cliente."
+    )
+    if _ui:
+        with _lock:
+            _ui.adicionar_mensagem(f"[ERRO DE VERSÃO] {mensagem}")
+    _rodando = False
+    _aguardando.set()
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -105,22 +121,43 @@ def main(stdscr):
     # ── Apelido ───────────────────────────────────────────────────────────────
     apelido = ui.ler_texto("Apelido: ")
     _apelido = apelido
-    sock.sendto(apelido.encode(), ADDR)
+
+    # ── Handshake com versão ──────────────────────────────────────────────────
+    # Envia apelido + versão em vez de apelido puro.
+    # O servidor valida a versão antes de prosseguir.
+    sock.sendto(proto.encode_handshake(apelido), ADDR)
 
     # ── Receptor ──────────────────────────────────────────────────────────────
     receptor = Receptor(
         sock,
-        on_mapa_estatico = _on_mapa_estatico,
-        on_estado        = _on_estado,
-        on_msg           = _on_msg,
-        on_erro          = _on_erro,
-        on_desligar      = _on_desligar,
-        on_escolha_time  = _on_escolha_time,
-        on_ping          = _on_ping,
+        on_mapa_estatico   = _on_mapa_estatico,
+        on_estado          = _on_estado,
+        on_msg             = _on_msg,
+        on_erro            = _on_erro,
+        on_desligar        = _on_desligar,
+        on_escolha_time    = _on_escolha_time,
+        on_ping            = _on_ping,
+        on_versao_ok       = _on_versao_ok,
+        on_versao_invalida = _on_versao_invalida,
     )
     receptor.iniciar()
 
+    # ── Aguarda resposta de versão ────────────────────────────────────────────
+    ui.adicionar_mensagem(f"Verificando versão do servidor (v{proto.VERSAO})...")
+    _aguardando.wait(timeout=10)
+    _aguardando.clear()
+
+    # Se versão inválida ou timeout, encerra
+    if not _rodando:
+        ui.adicionar_mensagem("Pressione qualquer tecla para sair.")
+        ui.ler_tecla()
+        receptor.parar()
+        sock.close()
+        return
+
     # ── Escolha de time ───────────────────────────────────────────────────────
+    # _on_escolha_time já fez set() no _aguardando via msg_escolha_time do servidor
+    # mas pode não ter chegado ainda — aguarda
     _aguardando.wait(timeout=10)
     _aguardando.clear()
     if not _rodando:
@@ -130,7 +167,7 @@ def main(stdscr):
         escolha = ui.ler_texto("Seu time (A ou B): ").strip().upper()
         if escolha in ("A", "B"):
             sock.sendto(f"{proto.CMD_TIME} {escolha}".encode(), ADDR)
-            _meu_time = escolha   # usado apenas como fallback de UI até o 1º estado
+            _meu_time = escolha
             break
         ui.adicionar_mensagem("[!] Digite A ou B.")
 
@@ -143,41 +180,31 @@ def main(stdscr):
     ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  /sair=sair")
 
     # ── Loop de input ─────────────────────────────────────────────────────────
+    TECLAS_MOVER = {
+        "KEY_UP": "cima", "KEY_DOWN": "baixo",
+        "KEY_LEFT": "esq", "KEY_RIGHT": "dir",
+    }
+    TECLAS_ATIRAR = {
+        "w": "cima", "W": "cima",
+        "s": "baixo", "S": "baixo",
+        "a": "esq",   "A": "esq",
+        "d": "dir",   "D": "dir",
+    }
+
     while _rodando:
         try:
             tecla = ui.ler_tecla()
         except KeyboardInterrupt:
             break
 
-        # Movimento — sem throttle local, servidor decide
-        if tecla in {
-            "KEY_UP": "cima", "KEY_DOWN": "baixo",
-            "KEY_LEFT": "esq", "KEY_RIGHT": "dir",
-        }:
-            direcao = {
-                "KEY_UP": "cima", "KEY_DOWN": "baixo",
-                "KEY_LEFT": "esq", "KEY_RIGHT": "dir",
-            }[tecla]
-            sock.sendto(f"{proto.CMD_MOVER} {direcao}".encode(), ADDR)
+        if tecla in TECLAS_MOVER:
+            sock.sendto(f"{proto.CMD_MOVER} {TECLAS_MOVER[tecla]}".encode(), ADDR)
             continue
 
-        # Tiro
-        if tecla in {
-            "w": "cima", "W": "cima",
-            "s": "baixo", "S": "baixo",
-            "a": "esq",   "A": "esq",
-            "d": "dir",   "D": "dir",
-        }:
-            direcao = {
-                "w": "cima", "W": "cima",
-                "s": "baixo", "S": "baixo",
-                "a": "esq",   "A": "esq",
-                "d": "dir",   "D": "dir",
-            }[tecla]
-            sock.sendto(f"{proto.CMD_ATIRAR} {direcao}".encode(), ADDR)
+        if tecla in TECLAS_ATIRAR:
+            sock.sendto(f"{proto.CMD_ATIRAR} {TECLAS_ATIRAR[tecla]}".encode(), ADDR)
             continue
 
-        # Comando de texto (/, chat)
         if tecla == "/":
             texto = "/" + ui.ler_texto("> /")
             texto = texto.strip()
