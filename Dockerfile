@@ -7,9 +7,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 
 WORKDIR /app
 
-COPY shared/shared/
-COPY server/server/
-COPY servidor.py .
+COPY servidor.py  ./servidor.py
+COPY shared/      ./shared/
+COPY server/      ./server/
 
 RUN touch shared/__init__.py server/__init__.py
 
@@ -20,6 +20,5 @@ EXPOSE ${PORT}/udp
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
     CMD pgrep -f "servidor.py" > /dev/null || exit 1
-
 
 CMD ["python", "servidor.py"]
