@@ -46,6 +46,18 @@ def iniciar(sock, log_fn):
     _itens = Itens.gerar_itens(Mapa.MAPA_LINHAS, Mapa.MAPA_COLUNAS)
     _log(f"[ITENS] {len(_itens)} itens gerados no campo.")
 
+    Itens.iniciar_respawn(
+    itens          = _itens,
+    mapa_linhas    = Mapa.MAPA_LINHAS,
+    mapa_colunas   = Mapa.MAPA_COLUNAS,
+    clientes_ref   = clientes,
+    lock_clientes  = lock,
+    on_respawn     = _broadcast_estado_todos,
+    log_fn         = _log,
+    )
+
+    _log(f"[ITENS] Respawn automático iniciado (intervalo={Itens.INTERVALO_RESPAWN}s).")
+
     Bandeiras.configurar(on_evento=_broadcast_chat)
     _log("[CTF] Bandeiras posicionadas.")
 
