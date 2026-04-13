@@ -4,6 +4,7 @@ cliente.py — Entry point do cliente UDP.
 import socket
 import threading
 import curses
+import time
 
 from shared import protocolo as proto
 from client.ui   import UI
@@ -176,6 +177,8 @@ def main(stdscr):
     ui.status_jogo(_meu_time, _meu_hp, _meu_balas, _meu_bandeira, _meu_ping)
     ui.adicionar_mensagem("Pronto! Setas=mover  │  WASD=atirar  │  /sair=sair")
 
+    _ultimo_movimento = 0.0
+
     # ── Loop de input ─────────────────────────────────────────────────────────
     while _rodando:
         try:
@@ -184,7 +187,10 @@ def main(stdscr):
             break
 
         if tecla in TECLAS_MOVER:
-            sock.sendto(f"{proto.CMD_MOVER} {TECLAS_MOVER[tecla]}".encode(), ADDR)
+            agora = time.time()
+            if agora - _ultimo_movimento >= 0.1:  
+                _ultimo_movimento = agora
+                sock.sendto(f"{proto.CMD_MOVER} {TECLAS_MOVER[tecla]}".encode(), ADDR)
             continue
 
         if tecla in TECLAS_ATIRAR:
