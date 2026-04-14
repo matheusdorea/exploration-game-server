@@ -14,6 +14,11 @@ Segurança:
   - Estado autoritativo: HP, balas, escudo e bandeira são lidos do servidor
     e embutidos no campo "meu_estado" de cada pacote enviado individualmente.
   - Cliente não guarda nem valida nenhum desses valores.
+
+RTT real:
+  - Cliente envia CMD_PING_CLIENTE com timestamp float.
+  - Servidor ecoa de volta com msg_pong_servidor(timestamp).
+  - Tratado inline no dispatcher (µs, sem lógica de jogo).
 """
 import os
 import threading
@@ -115,10 +120,6 @@ def _enviar(addr, dados: bytes):
         pass
 
 def _meu_estado_para(addr) -> dict:
-    """
-    Monta o bloco de estado pessoal do jogador lendo do dict autoritativo
-    do servidor. Embutido em cada pacote enviado individualmente ao cliente.
-    """
     dados   = clientes.get(addr, {})
     apelido = dados.get("apelido", "")
 
@@ -134,21 +135,18 @@ def _meu_estado_para(addr) -> dict:
     }
 
 def _estado_payload() -> tuple:
-    """Retorna os componentes do estado global (sem meu_estado)."""
     jogs, projs = Mapa.snapshot_estado(clientes, Projeteis.snapshot_projeteis())
     itens_snap  = Itens.snapshot_itens(_itens)
     bands_snap  = Bandeiras.snapshot()
     return jogs, projs, itens_snap, bands_snap
 
 def _enviar_estado(addr):
-    """Envia estado global + meu_estado personalizado para um único cliente."""
     jogs, projs, itens_snap, bands_snap = _estado_payload()
     meu   = _meu_estado_para(addr)
     dados = proto.msg_estado(jogs, projs, itens_snap, bands_snap, meu_estado=meu)
     _enviar(addr, dados)
 
 def _broadcast_estado_todos():
-    """Envia estado personalizado para cada cliente individualmente."""
     jogs, projs, itens_snap, bands_snap = _estado_payload()
     with lock:
         for addr in list(clientes):
@@ -172,10 +170,6 @@ def _broadcast_chat(texto: str, exceto=None):
             _enviar(addr, dados)
 
 def _notificar_atingido(addr, hp: int, atirador: str):
-    """
-    Ao ser atingido: envia notificação textual + estado atualizado.
-    Sem msg_atingido separada — HP autoritativo chega no meu_estado.
-    """
     msg = (
         f"☠ Você foi eliminado por {atirador}! Voltando à base..."
         if hp == 0 else
@@ -234,14 +228,10 @@ def _pode_mover(addr) -> bool:
 
 # ── Handlers (executados pelos workers da pool) ───────────────────────────────
 def _registrar_jogador(addr, data: bytes):
-    """
-    Valida a versão do cliente antes de qualquer outra coisa.
-    Rejeita silenciosamente (com msg_versao_invalida) se a versão divergir.
-    """
     apelido, versao_cliente = proto.decode_handshake(data)
 
     if not apelido:
-        return   # pacote malformado — ignora
+        return
 
     if versao_cliente != proto.VERSAO:
         _log(
@@ -320,7 +310,6 @@ def _desconectar(addr, motivo: str = "saiu"):
 
 
 def _processar_movimento(addr, direcao: str):
-    # Throttle server-side: ignora silenciosamente se rápido demais
     if not _pode_mover(addr):
         return
 
@@ -391,9 +380,19 @@ def loop_recebimento():
             data, addr = _socket.recvfrom(proto.BUFFERSIZE)
             msg = data.decode().strip()
 
-            # Pong tratado inline — µs, sem lógica de jogo
+            # Pong keepalive — tratado inline, µs
             if msg == proto.CMD_PONG:
                 _registrar_pong(addr)
+                continue
+
+            # Ping RTT do cliente — ecoa timestamp de volta inline, µs
+            if msg.startswith(proto.CMD_PING_CLIENTE + " "):
+                _registrar_pong(addr)
+                try:
+                    ts = float(msg[len(proto.CMD_PING_CLIENTE) + 1:])
+                    _enviar(addr, proto.msg_pong_servidor(ts))
+                except ValueError:
+                    pass
                 continue
 
             if addr not in clientes and addr not in _aguardando_time:

@@ -9,7 +9,7 @@ from shared import protocolo as proto
 class Receptor:
     def __init__(self, sock, on_mapa_estatico, on_estado, on_msg,
                  on_erro, on_desligar, on_escolha_time, on_ping,
-                 on_versao_ok, on_versao_invalida):
+                 on_versao_ok, on_versao_invalida, on_pong_servidor=None):
         self._sock                = sock
         self._on_mapa_estatico    = on_mapa_estatico
         self._on_estado           = on_estado
@@ -20,6 +20,7 @@ class Receptor:
         self._on_ping             = on_ping
         self._on_versao_ok        = on_versao_ok
         self._on_versao_invalida  = on_versao_invalida
+        self._on_pong_servidor    = on_pong_servidor   # callback RTT real
         self._rodando             = True
         self._thread              = threading.Thread(target=self._loop, daemon=True)
 
@@ -71,6 +72,10 @@ class Receptor:
 
                 elif tipo == proto.TIPO_PING:
                     self._on_ping()
+
+                elif tipo == proto.TIPO_PONG_SERVIDOR:
+                    if self._on_pong_servidor:
+                        self._on_pong_servidor(payload.get("ts", 0.0))
 
             except Exception:
                 if self._rodando:
